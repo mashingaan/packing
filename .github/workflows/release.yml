@@ -1,0 +1,132 @@
+name: Release Installer
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag, for example v0.3.0"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark the GitHub Release as pre-release"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --no-progress -y
+
+      - name: Resolve release metadata
+        id: meta
+        shell: powershell
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tagName = "${{ inputs.tag_name }}".Trim()
+            $isPrerelease = if ("${{ inputs.prerelease }}" -eq "true") { "true" } else { "false" }
+          }
+          else {
+            $tagName = "${{ github.ref_name }}".Trim()
+            $isPrerelease = "false"
+          }
+
+          if ([string]::IsNullOrWhiteSpace($tagName)) {
+            throw "Release tag is required."
+          }
+
+          $appVersion = python -c "import pathlib, sys; sys.path.insert(0, str(pathlib.Path('src').resolve())); import packing_mvp; print(packing_mvp.__version__)"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to read packing_mvp.__version__."
+          }
+
+          $appVersion = $appVersion.Trim()
+          $normalizedTagVersion = $tagName -replace "^[vV]", ""
+          if ($normalizedTagVersion -ne $appVersion) {
+            throw "Tag version '$tagName' does not match app version '$appVersion'."
+          }
+
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "tag_name=$tagName"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "app_version=$appVersion"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "prerelease=$isPrerelease"
+
+      - name: Create tag for manual release
+        if: github.event_name == 'workflow_dispatch'
+        shell: powershell
+        run: |
+          $tagName = "${{ steps.meta.outputs.tag_name }}"
+          git fetch --tags --force
+          $existingTag = git tag --list $tagName
+          if ([string]::IsNullOrWhiteSpace($existingTag)) {
+            git tag $tagName $env:GITHUB_SHA
+            git push origin $tagName
+          }
+
+      - name: Install Python dependencies
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[build]"
+
+      - name: Run test suite
+        shell: powershell
+        run: python -m unittest discover -s tests -v
+
+      - name: Build installer
+        shell: powershell
+        run: .\scripts\build_installer.ps1 -PythonExe python
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packing-mvp-${{ steps.meta.outputs.app_version }}
+          path: |
+            dist-installer/PackingMVP-Setup.exe
+            dist-installer/PackingMVP-Setup.exe.sha256
+
+      - name: Publish GitHub Release assets
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tagName = "${{ steps.meta.outputs.tag_name }}"
+          $releaseExe = Join-Path $PWD "dist-installer\PackingMVP-Setup.exe"
+          $releaseHash = "$releaseExe.sha256"
+          $repo = "${{ github.repository }}"
+          $isPrerelease = "${{ steps.meta.outputs.prerelease }}"
+
+          gh release view $tagName --repo $repo *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tagName $releaseExe $releaseHash --repo $repo --clobber
+          }
+          else {
+            $arguments = @("release", "create", $tagName, $releaseExe, $releaseHash, "--repo", $repo, "--generate-notes")
+            if ($isPrerelease -eq "true") {
+              $arguments += "--prerelease"
+            }
+            & gh @arguments
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to create GitHub Release."
+            }
+          }

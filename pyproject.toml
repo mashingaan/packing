@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "packing-mvp"
+dynamic = ["version"]
+description = "MVP STEP bbox packer for shipment boxes"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "gmsh>=4.11",
+  "cadquery-ocp>=7.9.3.1",
+  "numpy>=1.24",
+  "matplotlib>=3.7",
+  "pillow>=10.0",
+  "packaging>=24.0",
+  "windnd>=1.0.7",
+]
+
+[project.scripts]
+packer = "packing_mvp.cli:main"
+packing-gui = "packing_mvp.gui:main"
+
+[project.optional-dependencies]
+build = [
+  "pyinstaller>=6.0",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.dynamic]
+version = { attr = "packing_mvp.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

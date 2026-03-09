@@ -1,0 +1,16 @@
+.pytest_cache/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+build/
+dist/
+dist-installer/
+out-real-check/
+
+src/*.egg-info/
+
+.DS_Store
+Thumbs.db
