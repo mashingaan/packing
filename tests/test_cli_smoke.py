@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from io import BytesIO, TextIOWrapper
 import json
 from pathlib import Path
 import sys
@@ -104,6 +105,47 @@ def _fake_export_arranged_step(
 
 
 class CliSmokeTests(unittest.TestCase):
+    def test_cli_handles_non_utf_console_encoding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            input_path = tmp_path / "dummy.step"
+            out_dir = tmp_path / "out"
+            input_path.write_text("dummy", encoding="utf-8")
+            stdout_buffer = BytesIO()
+            stderr_buffer = BytesIO()
+            stdout_stream = TextIOWrapper(stdout_buffer, encoding="cp1252")
+            stderr_stream = TextIOWrapper(stderr_buffer, encoding="cp1252")
+
+            with patch.object(sys, "stdout", stdout_stream):
+                with patch.object(sys, "stderr", stderr_stream):
+                    with patch("packing_mvp.runner.extract_parts_from_step", side_effect=_fake_extract):
+                        with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
+                            with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
+                                with patch(
+                                    "packing_mvp.runner.export_arranged_step",
+                                    side_effect=_fake_export_arranged_step,
+                                ):
+                                    exit_code = main(
+                                        [
+                                            "--input",
+                                            str(input_path),
+                                            "--out",
+                                            str(out_dir),
+                                            "--maxW",
+                                            "1000",
+                                            "--maxH",
+                                            "1000",
+                                            "--gap",
+                                            "10",
+                                        ]
+                                    )
+            stdout_stream.flush()
+            stderr_stream.flush()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn(str(out_dir).encode("ascii"), stdout_buffer.getvalue())
+        self.assertIn(b"INFO | Starting packer", stderr_buffer.getvalue())
+
     def test_cli_creates_expected_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)

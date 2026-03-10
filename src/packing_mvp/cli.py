@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
+from typing import TextIO
 
 from packing_mvp.presentation import format_result_summary, result_is_successful_fit
 from packing_mvp.runner import PackingRequest, run_packing_job
@@ -66,6 +67,40 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _print_text(stream: TextIO, text: str) -> None:
+    try:
+        print(text, file=stream)
+        return
+    except UnicodeEncodeError:
+        if _try_reconfigure_utf8(stream):
+            print(text, file=stream)
+            return
+
+    _write_with_replacement(stream, f"{text}\n")
+
+
+def _try_reconfigure_utf8(stream: TextIO) -> bool:
+    reconfigure = getattr(stream, "reconfigure", None)
+    if not callable(reconfigure):
+        return False
+    try:
+        reconfigure(encoding="utf-8", errors="strict")
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _write_with_replacement(stream: TextIO, text: str) -> None:
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    payload = text.encode(encoding, errors="replace")
+    buffer = getattr(stream, "buffer", None)
+    if buffer is not None:
+        buffer.write(payload)
+    else:
+        stream.write(payload.decode(encoding, errors="replace"))
+    stream.flush()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     result = run_packing_job(
@@ -87,8 +122,8 @@ def main(argv: list[str] | None = None) -> int:
         with_console=True,
     )
     stream = sys.stdout if result.exit_code == 0 and result_is_successful_fit(result.result_data) else sys.stderr
-    print(format_result_summary(result.result_data), file=stream)
-    print(f"Результаты сохранены в: {result.out_dir}", file=stream)
+    _print_text(stream, format_result_summary(result.result_data))
+    _print_text(stream, f"Результаты сохранены в: {result.out_dir}")
     return result.exit_code
 
 
