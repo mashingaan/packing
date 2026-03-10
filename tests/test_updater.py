@@ -123,6 +123,42 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn("PackingMVP-Setup.exe", script_text)
         self.assertIn("Packing.exe", script_text)
         self.assertIn("/VERYSILENT", script_text)
+        self.assertIn("$defaultInstallDirName = 'Packing MVP'", script_text)
+        self.assertIn("Inno Setup: App Path", script_text)
+        self.assertIn("Start-Process -FilePath $launchTarget | Out-Null", script_text)
+
+    def test_prepare_update_launcher_prefers_installed_copy_over_current_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            installer_path = tmp_path / "PackingMVP-Setup.exe"
+            installer_path.write_bytes(b"installer")
+            downloaded_update = DownloadedUpdate(
+                release_info=ReleaseInfo(
+                    version="0.4.0",
+                    release_url="https://github.com/mashingaan/packing/releases/tag/v0.4.0",
+                    installer_asset=ReleaseAsset(
+                        name="PackingMVP-Setup.exe",
+                        download_url="https://example.com/PackingMVP-Setup.exe",
+                    ),
+                ),
+                installer_path=installer_path,
+            )
+
+            script_path = prepare_update_launcher(
+                downloaded_update,
+                app_executable=Path(r"C:\Users\User\Desktop\Packing.exe"),
+                current_pid=4321,
+                work_dir=tmp_path,
+            )
+
+            script_text = script_path.read_text(encoding="utf-8")
+
+        self.assertLess(
+            script_text.index("$defaultInstalledApp = Join-Path"),
+            script_text.index("[void]$launchCandidates.Add($app)"),
+        )
+        self.assertIn("HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall", script_text)
+        self.assertIn("{8FD8A4C6-8F6F-4F8B-A9AA-FA38718AC550}_is1", script_text)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,8 @@ from packing_mvp.update_config import (
 )
 
 INSTALLER_ARGUMENTS = ("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-")
+INSTALLED_APP_DIRECTORY_NAME = "Packing MVP"
+INNO_APP_ID = "{8FD8A4C6-8F6F-4F8B-A9AA-FA38718AC550}"
 
 
 @dataclass(frozen=True)
@@ -354,19 +356,58 @@ def _build_update_launcher_script(
 ) -> str:
     installer_literal = _powershell_literal(str(installer_path))
     app_literal = _powershell_literal(str(app_executable))
+    app_name_literal = _powershell_literal(app_executable.name)
+    install_dir_name_literal = _powershell_literal(INSTALLED_APP_DIRECTORY_NAME)
     installer_arguments = ", ".join(_powershell_literal(argument) for argument in INSTALLER_ARGUMENTS)
+    registry_key_suffixes = ", ".join(_powershell_literal(value) for value in _inno_uninstall_key_suffixes())
     return "\n".join(
         [
             f"$installer = {installer_literal}",
             f"$app = {app_literal}",
+            f"$appName = {app_name_literal}",
+            f"$defaultInstallDirName = {install_dir_name_literal}",
             f"$pidToWait = {current_pid}",
             f"$installerArgs = @({installer_arguments})",
+            f"$registryKeySuffixes = @({registry_key_suffixes})",
+            "$registryRoots = @(",
+            "    'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',",
+            "    'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',",
+            "    'HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall'",
+            ")",
             "while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {",
             "    Start-Sleep -Milliseconds 500",
             "}",
-            "Start-Process -FilePath $installer -ArgumentList $installerArgs -Wait | Out-Null",
-            "if (Test-Path -LiteralPath $app) {",
-            "    Start-Process -FilePath $app | Out-Null",
+            "$installerProcess = Start-Process -FilePath $installer -ArgumentList $installerArgs -Wait -PassThru",
+            "if ($null -eq $installerProcess -or $installerProcess.ExitCode -ne 0) {",
+            "    exit",
+            "}",
+            "$launchCandidates = New-Object System.Collections.Generic.List[string]",
+            "if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {",
+            "    $defaultInstalledApp = Join-Path (Join-Path (Join-Path $env:LOCALAPPDATA 'Programs') $defaultInstallDirName) $appName",
+            "    [void]$launchCandidates.Add($defaultInstalledApp)",
+            "}",
+            "foreach ($registryRoot in $registryRoots) {",
+            "    foreach ($keySuffix in $registryKeySuffixes) {",
+            "        $registryPath = Join-Path $registryRoot $keySuffix",
+            "        if (-not (Test-Path -LiteralPath $registryPath)) {",
+            "            continue",
+            "        }",
+            "        $installInfo = Get-ItemProperty -LiteralPath $registryPath -ErrorAction SilentlyContinue",
+            "        if ($null -eq $installInfo) {",
+            "            continue",
+            "        }",
+            "        foreach ($installDir in @($installInfo.InstallLocation, $installInfo.'Inno Setup: App Path')) {",
+            "            if ([string]::IsNullOrWhiteSpace($installDir)) {",
+            "                continue",
+            "            }",
+            "            [void]$launchCandidates.Add((Join-Path $installDir $appName))",
+            "        }",
+            "    }",
+            "}",
+            "[void]$launchCandidates.Add($app)",
+            "$launchTarget = $launchCandidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1",
+            "if ($null -ne $launchTarget) {",
+            "    Start-Process -FilePath $launchTarget | Out-Null",
             "}",
             "Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue",
         ]
@@ -375,3 +416,10 @@ def _build_update_launcher_script(
 
 def _powershell_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _inno_uninstall_key_suffixes() -> tuple[str, ...]:
+    return (
+        f"{INNO_APP_ID}_is1",
+        f"{INSTALLED_APP_DIRECTORY_NAME}_is1",
+    )
