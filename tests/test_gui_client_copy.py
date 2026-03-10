@@ -5,6 +5,7 @@ import sys
 import tempfile
 import tkinter as tk
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -12,6 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from packing_mvp.gui import DEFAULT_GUI_SEED, PackingGui, _format_client_result
+from packing_mvp.runner import PackingRunResult
 
 
 class GuiClientCopyTests(unittest.TestCase):
@@ -199,6 +201,50 @@ class GuiBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(input_count, "5")
         self.assertIn("Всего деталей: 5", summary)
+
+
+    def test_gui_uses_fit_verdict_for_success_message(self) -> None:
+        app = self._build_app()
+        try:
+            result = PackingRunResult(
+                exit_code=0,
+                out_dir=Path("out"),
+                result_path=Path("out/result.json"),
+                placements_path=Path("out/placements.csv"),
+                log_path=Path("out/packing.log"),
+                preview_top_path=None,
+                preview_side_path=None,
+                preview_gif_path=None,
+                result_data={
+                    "status": "ok",
+                    "fits": False,
+                    "does_not_fit": False,
+                    "violations": [
+                        {
+                            "axis": "L",
+                            "max": 10000,
+                            "actual": 10284,
+                            "excess": 284,
+                        }
+                    ],
+                    "constraints": {"maxL": 10000, "maxW": 2500, "maxH": 1800},
+                    "used_extents_mm": {"L": 10284, "W": 2400, "H": 1700, "maxX": 10274, "maxY": 2390, "maxZ": 1690},
+                    "stats": {"n_parts": 5},
+                },
+            )
+
+            with patch("packing_mvp.gui.messagebox.showinfo") as showinfo:
+                with patch("packing_mvp.gui.messagebox.showerror") as showerror:
+                    app._handle_result(result)
+
+            showinfo.assert_not_called()
+            showerror.assert_called_once()
+            self.assertGreaterEqual(len(showerror.call_args.args), 2)
+            self.assertIn("10284 / 10000", showerror.call_args.args[1])
+            self.assertNotIn("Р’СЃРµ РґРµС‚Р°Р»Рё РїРѕРјРµС‰Р°СЋС‚СЃСЏ", app.status_var.get())
+            self.assertIn("10284 / 10000", app.status_var.get())
+        finally:
+            app.destroy()
 
 
 if __name__ == "__main__":

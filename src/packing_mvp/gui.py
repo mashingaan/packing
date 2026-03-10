@@ -16,7 +16,12 @@ except ImportError:
     windnd = None
 
 from packing_mvp import __version__
-from packing_mvp.presentation import format_result_summary, get_result_banner
+from packing_mvp.presentation import (
+    format_result_summary,
+    get_result_banner,
+    result_is_constraint_failure,
+    result_is_successful_fit,
+)
 from packing_mvp.update_config import AUTO_CHECK_FOR_UPDATES
 from packing_mvp.updater import (
     DownloadedUpdate,
@@ -78,7 +83,7 @@ def _banner_for_result(result: PackingRunResult) -> str:
 
 
 def _format_client_result(result_data: dict[str, Any]) -> str:
-    if result_data.get("status") != "ok" or result_data.get("does_not_fit"):
+    if not result_is_successful_fit(result_data):
         return format_result_summary(result_data)
 
     dims = result_data.get("recommended_dims_mm") or {}
@@ -1542,13 +1547,13 @@ class PackingGui(tk.Tk):
         self.status_var.set(summary)
         self._append_log(summary)
 
-        if result.exit_code == 0:
+        if result.exit_code == 0 and result_is_successful_fit(result.result_data):
             self._append_log(f"Результаты сохранены в: {result.out_dir}")
             messagebox.showinfo("Готово", summary)
         else:
             self._append_log(f"Подробности смотрите в: {result.log_path}")
             self._append_log(f"Результаты сохранены в: {result.out_dir}")
-            if banner == NO_FIT_BANNER:
+            if banner == NO_FIT_BANNER or result_is_constraint_failure(result.result_data):
                 messagebox.showerror("Не помещается", summary)
             else:
                 messagebox.showerror("Ошибка упаковки", summary)

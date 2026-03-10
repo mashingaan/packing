@@ -29,6 +29,7 @@ def build_success_result(
     outcome: PackOutcome,
     units: dict[str, Any],
 ) -> dict[str, Any]:
+    fit_verdict = validate_constraints(outcome, constraints)
     packed_volume = sum(
         placement.dx * placement.dy * placement.dz for placement in outcome.placements
     )
@@ -43,19 +44,17 @@ def build_success_result(
         "copies": _copies(constraints),
         "planar_rotation_step_deg": _planar_rotation_step_deg(constraints),
         "packing_mode": _packing_mode(constraints),
-        "does_not_fit": False,
-        "limit_exceeded": None,
+        "fits": fit_verdict["fits"],
+        "does_not_fit": fit_verdict["does_not_fit"],
+        "violations": fit_verdict["violations"],
+        "limit_exceeded": fit_verdict["limit_exceeded"],
         "max_package_dims_mm": _max_package_dims(constraints),
         "recommended_dims_mm": {
             "L": outcome.recommended_dims[0],
             "W": outcome.recommended_dims[1],
             "H": outcome.recommended_dims[2],
         },
-        "used_extents_mm": {
-            "maxX": ceil_mm(outcome.used_extents[0]),
-            "maxY": ceil_mm(outcome.used_extents[1]),
-            "maxZ": ceil_mm(outcome.used_extents[2]),
-        },
+        "used_extents_mm": fit_verdict["used_extents_mm"],
         "packed_count": packed_count,
         "unpacked_count": unpacked_count,
         "stats": {
@@ -98,10 +97,8 @@ def build_failure_result(
         if unpacked_count is not None
         else max(0, int(n_parts) - resolved_packed_count)
     )
-    limit_exceeded = _limit_exceeded_payload(
-        constraints=constraints,
-        used_extents=used_extents,
-    )
+    fit_verdict = validate_constraints(used_extents, constraints)
+    resolved_does_not_fit = bool(does_not_fit or fit_verdict["does_not_fit"])
     return {
         "status": "failed",
         "error": message,
@@ -112,15 +109,17 @@ def build_failure_result(
         "copies": _copies(constraints),
         "planar_rotation_step_deg": _planar_rotation_step_deg(constraints),
         "packing_mode": _packing_mode(constraints),
-        "does_not_fit": bool(does_not_fit),
-        "limit_exceeded": limit_exceeded,
+        "fits": fit_verdict["fits"],
+        "does_not_fit": resolved_does_not_fit,
+        "violations": fit_verdict["violations"],
+        "limit_exceeded": fit_verdict["limit_exceeded"],
         "max_package_dims_mm": _max_package_dims(constraints),
         "recommended_dims_mm": {
             "L": None,
             "W": None,
             "H": None,
         },
-        "used_extents_mm": _used_extents_payload(used_extents),
+        "used_extents_mm": fit_verdict["used_extents_mm"],
         "packed_count": resolved_packed_count,
         "unpacked_count": resolved_unpacked_count,
         "stats": {
@@ -142,6 +141,31 @@ def write_result_json(data: dict[str, Any], path: Path) -> None:
     path = Path(path)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False, indent=2)
+
+
+def validate_constraints(
+    result: PackOutcome | tuple[float, float, float] | None,
+    constraints: dict[str, Any],
+) -> dict[str, Any]:
+    used_extents = _coerce_used_extents(result)
+    actual_extents = _actual_used_extents_payload(
+        constraints=constraints,
+        used_extents=used_extents,
+    )
+    violations = _collect_constraint_violations(
+        constraints=constraints,
+        actual_extents=actual_extents,
+    )
+    return {
+        "fits": used_extents is not None and not violations,
+        "does_not_fit": bool(violations),
+        "violations": violations,
+        "limit_exceeded": violations[0] if violations else None,
+        "used_extents_mm": _used_extents_payload(
+            used_extents=used_extents,
+            actual_extents=actual_extents,
+        ),
+    }
 
 
 def _fmt(value: float) -> str:
@@ -301,52 +325,84 @@ def _planar_rotation_step_deg(constraints: dict[str, Any]) -> float:
 
 def _used_extents_payload(
     used_extents: tuple[float, float, float] | None,
+    actual_extents: dict[str, int | None] | None = None,
 ) -> dict[str, Any]:
+    actual_extents = actual_extents or {"L": None, "W": None, "H": None}
     if used_extents is None:
         return {
+            "L": actual_extents["L"],
+            "W": actual_extents["W"],
+            "H": actual_extents["H"],
             "maxX": None,
             "maxY": None,
             "maxZ": None,
         }
     return {
+        "L": actual_extents["L"],
+        "W": actual_extents["W"],
+        "H": actual_extents["H"],
         "maxX": ceil_mm(used_extents[0]),
         "maxY": ceil_mm(used_extents[1]),
         "maxZ": ceil_mm(used_extents[2]),
     }
 
+def _coerce_used_extents(
+    result: PackOutcome | tuple[float, float, float] | None,
+) -> tuple[float, float, float] | None:
+    if result is None:
+        return None
+    if isinstance(result, PackOutcome):
+        return result.used_extents
+    return result
 
-def _limit_exceeded_payload(
+
+def _actual_used_extents_payload(
     *,
     constraints: dict[str, Any],
     used_extents: tuple[float, float, float] | None,
-) -> dict[str, Any] | None:
+) -> dict[str, int | None]:
     if used_extents is None:
-        return None
+        return {
+            "L": None,
+            "W": None,
+            "H": None,
+        }
 
     gap_value = constraints.get("gap")
     gap = float(gap_value) if isinstance(gap_value, (int, float)) else 0.0
-    actuals = {
+    return {
         "L": ceil_mm(used_extents[0] + gap),
         "W": ceil_mm(used_extents[1] + gap),
         "H": ceil_mm(used_extents[2] + gap),
     }
+
+
+def _collect_constraint_violations(
+    *,
+    constraints: dict[str, Any],
+    actual_extents: dict[str, int | None],
+) -> list[dict[str, int | str]]:
     maximums = {
         "L": constraints.get("maxL"),
         "W": constraints.get("maxW"),
         "H": constraints.get("maxH"),
     }
-
+    violations: list[dict[str, int | str]] = []
     for axis in ("L", "W", "H"):
+        actual = actual_extents[axis]
+        if actual is None:
+            continue
         maximum = maximums[axis]
         if not isinstance(maximum, (int, float)):
             continue
         allowed = ceil_mm(float(maximum))
-        actual = actuals[axis]
         if actual > allowed:
-            return {
-                "axis": axis,
-                "max": allowed,
-                "actual": actual,
-                "excess": actual - allowed,
-            }
-    return None
+            violations.append(
+                {
+                    "axis": axis,
+                    "max": allowed,
+                    "actual": actual,
+                    "excess": actual - allowed,
+                }
+            )
+    return violations

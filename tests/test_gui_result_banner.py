@@ -44,5 +44,12 @@ class GuiResultBannerTests(unittest.TestCase):
         self.assertEqual(get_result_banner(exit_code=2, result_data=result_data), NO_FIT_BANNER)
 
 
+    def test_fit_verdict_false_suppresses_success_banner(self) -> None:
+        result_data = _make_result_data(status="ok")
+        result_data["fits"] = False
+        result_data["violations"] = [{"axis": "L", "max": 10000, "actual": 10284, "excess": 284}]
+        self.assertEqual(get_result_banner(exit_code=0, result_data=result_data), NO_FIT_BANNER)
+
+
 if __name__ == "__main__":
     unittest.main()

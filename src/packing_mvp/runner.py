@@ -10,6 +10,7 @@ from typing import Any, Callable, Literal
 from packing_mvp.export import (
     build_failure_result,
     build_success_result,
+    validate_constraints,
     write_placements_csv,
     write_result_json,
 )
@@ -28,7 +29,6 @@ from packing_mvp.utils import (
     build_rigid_group_copy_parts,
     ceil_mm,
     close_logger,
-    compute_used_extents,
     ensure_directory,
 )
 from packing_mvp.viz import render_preview_gif, render_previews
@@ -162,7 +162,12 @@ def run_packing_job(
                 planar_rotation_step_deg=request.planar_rotation_step_deg,
                 logger=logger,
             )
-            _validate_outcome_within_request(outcome=outcome, request=request)
+            _validate_outcome_within_request(
+                outcome=outcome,
+                request=request,
+                constraints=constraints,
+                logger=logger,
+            )
 
             _notify(status_callback, "Сохранение таблицы размещения...")
             write_placements_csv(outcome.placements, artifacts.placements_path)
@@ -437,6 +442,8 @@ def _build_failure_run_result(
     used_extents: tuple[float, float, float] | None,
 ) -> PackingRunResult:
     logger.error(message)
+    if does_not_fit:
+        logger.info("Final verdict: DOES NOT FIT")
     _cleanup_failed_artifacts(artifacts=artifacts, does_not_fit=does_not_fit)
     result = build_failure_result(
         input_paths=request.input_paths,
@@ -568,38 +575,93 @@ def _expand_requested_copies(
     return build_rigid_group_copy_parts(parts[0], request.copies)
 
 
-def _validate_outcome_within_request(*, outcome: Any, request: PackingRequest) -> None:
+def _validate_outcome_within_request(
+    *,
+    outcome: Any,
+    request: PackingRequest,
+    constraints: dict[str, Any],
+    logger: Any,
+) -> dict[str, Any]:
     placements = list(outcome.placements)
-    used_extents = compute_used_extents(placements)
+    fit_verdict = validate_constraints(outcome, constraints)
+    _log_fit_verdict(logger=logger, constraints=constraints, fit_verdict=fit_verdict)
+    if not fit_verdict["fits"]:
+        raise DoesNotFitError(_fit_verdict_message(fit_verdict))
 
-    actual_length = ceil_mm(used_extents[0] + request.gap)
-    actual_width = ceil_mm(used_extents[1] + request.gap)
-    actual_height = ceil_mm(used_extents[2] + request.gap)
-
-    if request.max_l is not None:
-        allowed_length = ceil_mm(request.max_l)
-        if actual_length > allowed_length:
-            raise DoesNotFitError(_limit_exceeded_message("L", actual_length, allowed_length))
-
+    actual_length = int(fit_verdict["used_extents_mm"]["L"])
+    actual_width = int(fit_verdict["used_extents_mm"]["W"])
+    actual_height = int(fit_verdict["used_extents_mm"]["H"])
+    allowed_length = ceil_mm(request.max_l) if request.max_l is not None else None
     allowed_width = ceil_mm(request.max_w)
-    if actual_width > allowed_width:
-        raise DoesNotFitError(_limit_exceeded_message("W", actual_width, allowed_width))
-
     allowed_height = ceil_mm(request.max_h)
-    if actual_height > allowed_height:
-        raise DoesNotFitError(_limit_exceeded_message("H", actual_height, allowed_height))
 
     for placement in placements:
         if placement.x < request.gap - EPS or placement.y < request.gap - EPS or placement.z < request.gap - EPS:
             raise RuntimeError(f"Placement {placement.part_id} violates the minimum wall gap.")
         if request.max_l is not None and placement.x + placement.dx > request.max_l - request.gap + EPS:
-            raise DoesNotFitError(_limit_exceeded_message("L", actual_length, ceil_mm(request.max_l)))
+            raise DoesNotFitError(_limit_exceeded_message("L", actual_length, int(allowed_length)))
         if placement.y + placement.dy > request.max_w - request.gap + EPS:
             raise DoesNotFitError(_limit_exceeded_message("W", actual_width, allowed_width))
         if placement.z + placement.dz > request.max_h - request.gap + EPS:
             raise DoesNotFitError(_limit_exceeded_message("H", actual_height, allowed_height))
         if request.flat_only and abs(placement.dz - min(placement.part.dims)) > EPS:
             raise RuntimeError(f"Placement {placement.part_id} violates the flat-only constraint.")
+    return fit_verdict
+
+
+def _log_fit_verdict(
+    *,
+    logger: Any,
+    constraints: dict[str, Any],
+    fit_verdict: dict[str, Any],
+) -> None:
+    active_constraints: list[str] = []
+    for axis, key in (("L", "maxL"), ("W", "maxW"), ("H", "maxH")):
+        maximum = constraints.get(key)
+        if isinstance(maximum, (int, float)):
+            active_constraints.append(f"{axis}<={ceil_mm(float(maximum))}")
+    logger.info("Active constraints: %s", ", ".join(active_constraints) if active_constraints else "none")
+
+    actual_extents = fit_verdict["used_extents_mm"]
+    if all(actual_extents.get(axis) is not None for axis in ("L", "W", "H")):
+        logger.info(
+            "Actual packed extents: L=%s, W=%s, H=%s",
+            actual_extents["L"],
+            actual_extents["W"],
+            actual_extents["H"],
+        )
+
+    for violation in fit_verdict["violations"]:
+        logger.error(
+            "Constraint violation: %s exceeds by %s mm (actual=%s, max=%s)",
+            violation["axis"],
+            violation["excess"],
+            violation["actual"],
+            violation["max"],
+        )
+
+    logger.info("Final verdict: %s", "FITS" if fit_verdict["fits"] else "DOES NOT FIT")
+
+
+def _fit_verdict_message(fit_verdict: dict[str, Any]) -> str:
+    violations = list(fit_verdict.get("violations") or [])
+    if not violations:
+        return "Packing found, but active hard constraints are not satisfied."
+    if len(violations) == 1:
+        violation = violations[0]
+        return _limit_exceeded_message(
+            str(violation["axis"]),
+            int(violation["actual"]),
+            int(violation["max"]),
+        )
+    return "; ".join(
+        _limit_exceeded_message(
+            str(violation["axis"]),
+            int(violation["actual"]),
+            int(violation["max"]),
+        )
+        for violation in violations
+    )
 
 
 def _limit_exceeded_message(axis: str, actual: int, allowed: int) -> str:

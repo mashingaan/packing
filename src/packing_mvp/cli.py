@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 import sys
 
-from packing_mvp.presentation import format_result_summary
+from packing_mvp.presentation import format_result_summary, result_is_successful_fit
 from packing_mvp.runner import PackingRequest, run_packing_job
 
 
@@ -86,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         with_console=True,
     )
-    stream = sys.stdout if result.exit_code == 0 else sys.stderr
+    stream = sys.stdout if result.exit_code == 0 and result_is_successful_fit(result.result_data) else sys.stderr
     print(format_result_summary(result.result_data), file=stream)
     print(f"Результаты сохранены в: {result.out_dir}", file=stream)
     return result.exit_code
