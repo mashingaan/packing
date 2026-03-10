@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import sys
-import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,8 +9,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from packing_mvp.export import build_success_result, validate_constraints, write_result_json
-from packing_mvp.packer import PackOutcome
+from packing_mvp.export import build_success_result, validate_constraints
+from packing_mvp.packer import DoesNotFitError, PackOutcome
 
 
 class ValidationTests(unittest.TestCase):
@@ -46,10 +44,12 @@ class ValidationTests(unittest.TestCase):
         self.assertFalse(verdict["does_not_fit"])
         self.assertEqual(verdict["violations"], [])
 
-    def test_result_json_contains_fit_status_and_violations(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            result_path = Path(tmp_dir) / "result.json"
-            result = build_success_result(
+    def test_build_success_result_rejects_constraint_violation(self) -> None:
+        with self.assertRaisesRegex(
+            DoesNotFitError,
+            "Не помещается: длина 10284 мм превышает допустимые 10000 мм на 284 мм",
+        ):
+            build_success_result(
                 input_paths=[Path("demo.step")],
                 constraints={"maxL": 10000, "maxW": 3000, "maxH": 2000, "gap": 0},
                 outcome=PackOutcome(
@@ -67,16 +67,6 @@ class ValidationTests(unittest.TestCase):
                     "auto_scale_factor": 1.0,
                 },
             )
-
-            write_result_json(result, result_path)
-            data = json.loads(result_path.read_text(encoding="utf-8"))
-
-        self.assertFalse(data["fits"])
-        self.assertTrue(data["does_not_fit"])
-        self.assertEqual(data["violations"][0]["axis"], "L")
-        self.assertEqual(data["violations"][0]["actual"], 10284)
-        self.assertEqual(data["used_extents_mm"]["L"], 10284)
-        self.assertEqual(data["constraints"]["maxL"], 10000)
 
 
 if __name__ == "__main__":

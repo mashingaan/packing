@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, Sequence
 
-from packing_mvp.packer import PackOutcome
+from packing_mvp.packer import DoesNotFitError, PackOutcome
 from packing_mvp.utils import Placement, ceil_mm
 
 
@@ -30,6 +30,8 @@ def build_success_result(
     units: dict[str, Any],
 ) -> dict[str, Any]:
     fit_verdict = validate_constraints(outcome, constraints)
+    if not fit_verdict["fits"]:
+        raise DoesNotFitError(format_constraint_failure_message(fit_verdict))
     packed_volume = sum(
         placement.dx * placement.dy * placement.dz for placement in outcome.placements
     )
@@ -166,6 +168,32 @@ def validate_constraints(
             actual_extents=actual_extents,
         ),
     }
+
+
+def format_constraint_failure_message(fit_verdict: dict[str, Any]) -> str:
+    violations = list(fit_verdict.get("violations") or [])
+    if not violations:
+        return "Packing found, but active hard constraints are not satisfied."
+    if len(violations) == 1:
+        return _format_constraint_violation_message(violations[0])
+    return "; ".join(_format_constraint_violation_message(violation) for violation in violations)
+
+
+def _format_constraint_violation_message(violation: dict[str, Any]) -> str:
+    axis_names = {
+        "L": "длина",
+        "W": "ширина",
+        "H": "высота",
+    }
+    axis = str(violation.get("axis") or "")
+    axis_name = axis_names.get(axis, axis)
+    actual = int(violation.get("actual") or 0)
+    maximum = int(violation.get("max") or 0)
+    excess = int(violation.get("excess") or (actual - maximum))
+    return (
+        f"Не помещается: {axis_name} {actual} мм "
+        f"превышает допустимые {maximum} мм на {excess} мм"
+    )
 
 
 def _fmt(value: float) -> str:

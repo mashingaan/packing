@@ -10,6 +10,7 @@ from typing import Any, Callable, Literal
 from packing_mvp.export import (
     build_failure_result,
     build_success_result,
+    format_constraint_failure_message,
     validate_constraints,
     write_placements_csv,
     write_result_json,
@@ -644,35 +645,4 @@ def _log_fit_verdict(
 
 
 def _fit_verdict_message(fit_verdict: dict[str, Any]) -> str:
-    violations = list(fit_verdict.get("violations") or [])
-    if not violations:
-        return "Packing found, but active hard constraints are not satisfied."
-    if len(violations) == 1:
-        violation = violations[0]
-        return _limit_exceeded_message(
-            str(violation["axis"]),
-            int(violation["actual"]),
-            int(violation["max"]),
-        )
-    return "; ".join(
-        _limit_exceeded_message(
-            str(violation["axis"]),
-            int(violation["actual"]),
-            int(violation["max"]),
-        )
-        for violation in violations
-    )
-
-
-def _limit_exceeded_message(axis: str, actual: int, allowed: int) -> str:
-    axis_names = {
-        "L": "длина",
-        "W": "ширина",
-        "H": "высота",
-    }
-    axis_name = axis_names.get(axis, axis)
-    excess = actual - allowed
-    return (
-        f"Не помещается: расчетная {axis_name} {actual} мм "
-        f"превышает допустимые {allowed} мм на {excess} мм"
-    )
+    return format_constraint_failure_message(fit_verdict)

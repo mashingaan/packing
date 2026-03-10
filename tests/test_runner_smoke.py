@@ -20,8 +20,9 @@ from packing_mvp.runner import (
     run_packing_job,
     run_packing_job_in_subprocess,
 )
+from packing_mvp.packer import PackOutcome
 from packing_mvp.presentation import format_result_summary
-from packing_mvp.utils import Part, SourceSolid
+from packing_mvp.utils import Part, Placement, SourceSolid
 
 
 def _solid_parts() -> list[Part]:
@@ -165,6 +166,39 @@ def _fake_merge_step_files(input_paths, output_path: Path, *, logger=None):
         encoding="utf-8",
     )
     return output_path
+
+
+def _fake_pack_outcome_with_length_overrun(
+    parts,
+    max_w: float,
+    max_h: float,
+    gap: float,
+    max_l: float | None = None,
+    seed: int = 42,
+    flat_only: bool = False,
+    planar_rotation_step_deg: float = 0.0,
+    logger=None,
+):
+    placements = [
+        Placement(
+            part=part,
+            x=float(index * 400),
+            y=0.0,
+            z=0.0,
+            dims=part.dims,
+            rot="xyz",
+            planar_angle_deg=0.0,
+        )
+        for index, part in enumerate(parts)
+    ]
+    return PackOutcome(
+        placements=placements,
+        used_extents=(10274.0, 2137.0, 938.0),
+        recommended_dims=(10284, 2147, 948),
+        container_dims=(10000, 2500, 1000),
+        search_length=10000,
+        fill_ratio_bbox=0.964,
+    )
 
 
 class _FakeQueue:
@@ -500,6 +534,71 @@ class RunnerSmokeTests(unittest.TestCase):
                 [str(index) for index in range(5)],
             )
             self.assertTrue(all(row["planar_angle_deg"] for row in rows))
+
+    def test_run_packing_job_fails_when_final_length_exceeds_max_length(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            input_path = tmp_path / "dummy.step"
+            out_dir = tmp_path / "out"
+            input_path.write_text("dummy", encoding="utf-8")
+
+            with patch("packing_mvp.runner.extract_parts_from_step", side_effect=_fake_extract):
+                with patch("packing_mvp.runner.pack_parts", side_effect=_fake_pack_outcome_with_length_overrun):
+                    with patch("packing_mvp.runner.render_previews") as render_mock:
+                        with patch("packing_mvp.runner.render_preview_gif") as gif_mock:
+                            with patch("packing_mvp.runner.export_arranged_step") as export_mock:
+                                result = run_packing_job(
+                                    PackingRequest(
+                                        input_path=input_path,
+                                        out_dir=out_dir,
+                                        max_w=2500.0,
+                                        max_h=1000.0,
+                                        max_l=10000.0,
+                                        gap=10.0,
+                                        seed=42,
+                                        flat_only=True,
+                                        treat_input_as_single_item=True,
+                                        copies=5,
+                                    ),
+                                    with_console=False,
+                                )
+
+            self.assertEqual(result.exit_code, 2)
+            self.assertFalse(result.placements_path.exists())
+            self.assertFalse((out_dir / "arranged.step").exists())
+            self.assertFalse((out_dir / "preview_top.png").exists())
+            self.assertFalse((out_dir / "preview_side.png").exists())
+            self.assertFalse((out_dir / "preview.gif").exists())
+            export_mock.assert_not_called()
+            render_mock.assert_not_called()
+            gif_mock.assert_not_called()
+
+            result_json = json.loads(result.result_path.read_text(encoding="utf-8"))
+            self.assertEqual(result_json["status"], "failed")
+            self.assertFalse(result_json["fits"])
+            self.assertTrue(result_json["does_not_fit"])
+            self.assertEqual(
+                result_json["violations"],
+                [
+                    {
+                        "axis": "L",
+                        "actual": 10284,
+                        "max": 10000,
+                        "excess": 284,
+                    }
+                ],
+            )
+            self.assertEqual(
+                result_json["error"],
+                "Не помещается: длина 10284 мм превышает допустимые 10000 мм на 284 мм",
+            )
+            self.assertEqual(result_json["used_extents_mm"]["L"], 10284)
+            self.assertEqual(result_json["used_extents_mm"]["W"], 2147)
+            self.assertEqual(result_json["used_extents_mm"]["H"], 948)
+
+            log_text = result.log_path.read_text(encoding="utf-8")
+            self.assertIn("Final verdict: DOES NOT FIT", log_text)
+            self.assertIn("Не помещается: длина 10284 мм превышает допустимые 10000 мм на 284 мм", log_text)
 
     def test_five_copies_fit_or_fail_cleanly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
