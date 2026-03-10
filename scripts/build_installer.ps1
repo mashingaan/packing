@@ -19,10 +19,13 @@ function Assert-LastExitCode {
 }
 
 if ([string]::IsNullOrWhiteSpace($IsccPath)) {
+    $IsccCommand = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
     $Candidates = @(
+        $IsccCommand.Source,
         "$env:LocalAppData\Programs\Inno Setup 6\ISCC.exe",
-        "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe",
-        "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+        "$env:ChocolateyInstall\lib\innosetup\tools\ISCC.exe"
     )
     $IsccPath = $Candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 }
