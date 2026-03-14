@@ -198,6 +198,7 @@ class Part:
     bbox_min: tuple[float, float, float]
     bbox_max: tuple[float, float, float]
     mode: Literal["solid", "rigid_group"] = "solid"
+    orientation_policy: Literal["default", "assembly_axes_parallel_to_box_axes"] = "default"
     source_solids: tuple[SourceSolid, ...] = ()
     source_part_id: str | None = None
     copy_index: int = 0
@@ -205,6 +206,8 @@ class Part:
     def __post_init__(self) -> None:
         if self.mode not in {"solid", "rigid_group"}:
             raise ValueError(f"Unsupported part mode: {self.mode}")
+        if self.orientation_policy not in {"default", "assembly_axes_parallel_to_box_axes"}:
+            raise ValueError(f"Unsupported orientation policy: {self.orientation_policy}")
         if self.copy_index < 0:
             raise ValueError("copy_index must be non-negative.")
 
@@ -368,6 +371,16 @@ def canonical_flat_orientation(
     return orientations[0]
 
 
+def canonical_rigid_assembly_orientation(
+    dims: tuple[float, float, float],
+) -> tuple[str, tuple[float, float, float]]:
+    target_dims = tuple(sorted((float(axis) for axis in dims), reverse=True))
+    for label, rotated_dims in unique_rotations(dims):
+        if all(abs(rotated_dims[index] - target_dims[index]) <= EPS for index in range(3)):
+            return label, rotated_dims
+    raise ValueError(f"No canonical rigid assembly orientation is available for dims={dims!r}.")
+
+
 def sample_planar_angles(step_deg: float) -> list[float]:
     if step_deg <= EPS:
         return [0.0]
@@ -425,6 +438,7 @@ def build_rigid_group_copy_parts(part: Part, copies: int) -> list[Part]:
                 bbox_min=part.bbox_min,
                 bbox_max=part.bbox_max,
                 mode=part.mode,
+                orientation_policy=part.orientation_policy,
                 source_solids=part.source_solids,
                 source_part_id=source_part_id,
                 copy_index=copy_index,

@@ -49,6 +49,7 @@ def _rigid_group_parts() -> list[Part]:
             bbox_min=(0.0, 0.0, 0.0),
             bbox_max=(350.0, 200.0, 100.0),
             mode="rigid_group",
+            orientation_policy="assembly_axes_parallel_to_box_axes",
             source_solids=(
                 SourceSolid(tag=1, bbox_min=(0.0, 0.0, 0.0), bbox_max=(300.0, 200.0, 100.0)),
                 SourceSolid(tag=2, bbox_min=(320.0, 20.0, 10.0), bbox_max=(350.0, 80.0, 60.0)),
@@ -289,9 +290,15 @@ class CliSmokeTests(unittest.TestCase):
             self.assertEqual(result["status"], "ok")
             self.assertEqual(result["stats"]["packed"], 1)
             self.assertTrue(result["constraints"]["treat_input_as_single_item"])
+            self.assertEqual(result["constraints"]["orientation_policy"], "assembly_axes_parallel_to_box_axes")
+            self.assertTrue(result["constraints"]["longest_to_length"])
+            self.assertTrue(result["constraints"]["shortest_to_height"])
             self.assertTrue(result["treat_input_as_single_item"])
             self.assertTrue(result["flat_only"])
             self.assertEqual(result["packing_mode"], "single_root_shape")
+            self.assertEqual(result["orientation_policy"], "assembly_axes_parallel_to_box_axes")
+            self.assertTrue(result["longest_to_length"])
+            self.assertTrue(result["shortest_to_height"])
 
             placements_header = (out_dir / "placements.csv").read_text(encoding="utf-8").splitlines()[0]
             self.assertEqual(
@@ -342,14 +349,21 @@ class CliSmokeTests(unittest.TestCase):
             result = json.loads((out_dir / "result.json").read_text(encoding="utf-8"))
             self.assertEqual(result["status"], "ok")
             self.assertEqual(result["copies"], 5)
-            self.assertEqual(result["planar_rotation_step_deg"], 5.0)
+            self.assertEqual(result["planar_rotation_step_deg"], 0.0)
             self.assertEqual(result["stats"]["packed"], 5)
+            self.assertEqual(result["orientation_policy"], "assembly_axes_parallel_to_box_axes")
+            self.assertTrue(result["longest_to_length"])
+            self.assertTrue(result["shortest_to_height"])
 
             with (out_dir / "placements.csv").open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 5)
             self.assertEqual(sorted(row["copy_index"] for row in rows), [str(index) for index in range(5)])
             self.assertTrue(all(row["planar_angle_deg"] for row in rows))
+            self.assertTrue(all(row["planar_angle_deg"] == "0.000" for row in rows))
+
+            log_text = (out_dir / "packing.log").read_text(encoding="utf-8")
+            self.assertIn("planar rotation disabled for rigid assembly axis-aligned mode", log_text)
 
 
 if __name__ == "__main__":

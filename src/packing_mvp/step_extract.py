@@ -249,6 +249,7 @@ def build_parts_from_scaled_solids(
             bbox_min=bbox_min,
             bbox_max=bbox_max,
             mode="rigid_group",
+            orientation_policy="assembly_axes_parallel_to_box_axes",
             source_solids=solids,
         )
     ]

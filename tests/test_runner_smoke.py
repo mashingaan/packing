@@ -42,6 +42,7 @@ def _rigid_group_parts() -> list[Part]:
             bbox_min=(0.0, 0.0, 0.0),
             bbox_max=(350.0, 200.0, 100.0),
             mode="rigid_group",
+            orientation_policy="assembly_axes_parallel_to_box_axes",
             source_solids=(
                 SourceSolid(tag=1, bbox_min=(0.0, 0.0, 0.0), bbox_max=(300.0, 200.0, 100.0)),
                 SourceSolid(tag=2, bbox_min=(320.0, 20.0, 10.0), bbox_max=(350.0, 80.0, 60.0)),
@@ -459,8 +460,14 @@ class RunnerSmokeTests(unittest.TestCase):
             self.assertEqual(result_json["stats"]["packed"], 1)
             self.assertTrue(result_json["constraints"]["flat_only"])
             self.assertTrue(result_json["constraints"]["treat_input_as_single_item"])
+            self.assertEqual(result_json["constraints"]["orientation_policy"], "assembly_axes_parallel_to_box_axes")
+            self.assertTrue(result_json["constraints"]["longest_to_length"])
+            self.assertTrue(result_json["constraints"]["shortest_to_height"])
             self.assertTrue(result_json["treat_input_as_single_item"])
             self.assertEqual(result_json["packing_mode"], "single_root_shape")
+            self.assertEqual(result_json["orientation_policy"], "assembly_axes_parallel_to_box_axes")
+            self.assertTrue(result_json["longest_to_length"])
+            self.assertTrue(result_json["shortest_to_height"])
 
             placements_header = result.placements_path.read_text(encoding="utf-8").splitlines()[0]
             self.assertEqual(
@@ -513,9 +520,12 @@ class RunnerSmokeTests(unittest.TestCase):
             self.assertFalse(result_json["does_not_fit"])
             self.assertEqual(result_json["packed_count"], 5)
             self.assertEqual(result_json["unpacked_count"], 0)
-            self.assertEqual(result_json["planar_rotation_step_deg"], 5.0)
+            self.assertEqual(result_json["planar_rotation_step_deg"], 0.0)
             self.assertEqual(result_json["constraints"]["copies"], 5)
-            self.assertEqual(result_json["constraints"]["planar_rotation_step_deg"], 5.0)
+            self.assertEqual(result_json["constraints"]["planar_rotation_step_deg"], 0.0)
+            self.assertEqual(result_json["orientation_policy"], "assembly_axes_parallel_to_box_axes")
+            self.assertTrue(result_json["longest_to_length"])
+            self.assertTrue(result_json["shortest_to_height"])
 
             placement_lines = result.placements_path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(placement_lines), 6)
@@ -534,6 +544,10 @@ class RunnerSmokeTests(unittest.TestCase):
                 [str(index) for index in range(5)],
             )
             self.assertTrue(all(row["planar_angle_deg"] for row in rows))
+            self.assertTrue(all(row["planar_angle_deg"] == "0.000" for row in rows))
+
+            log_text = result.log_path.read_text(encoding="utf-8")
+            self.assertIn("planar rotation disabled for rigid assembly axis-aligned mode", log_text)
 
     def test_run_packing_job_fails_when_final_length_exceeds_max_length(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

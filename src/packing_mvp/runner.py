@@ -160,7 +160,7 @@ def run_packing_job(
                 gap=request.gap,
                 seed=request.seed,
                 flat_only=request.flat_only,
-                planar_rotation_step_deg=request.planar_rotation_step_deg,
+                planar_rotation_step_deg=_effective_planar_rotation_step_deg(request),
                 logger=logger,
             )
             _validate_outcome_within_request(
@@ -384,8 +384,11 @@ def _build_constraints(request: PackingRequest) -> dict[str, Any]:
         "flat_only": request.flat_only,
         "treat_input_as_single_item": request.treat_input_as_single_item,
         "copies": request.copies,
-        "planar_rotation_step_deg": request.planar_rotation_step_deg,
+        "planar_rotation_step_deg": _effective_planar_rotation_step_deg(request),
         "packing_mode": _packing_mode(request),
+        "orientation_policy": _orientation_policy(request),
+        "longest_to_length": _longest_to_length(request),
+        "shortest_to_height": _shortest_to_height(request),
     }
 
 
@@ -406,18 +409,30 @@ def _log_request(logger: Any, request: PackingRequest) -> None:
         request.flat_only,
         request.treat_input_as_single_item,
         request.copies,
-        request.planar_rotation_step_deg,
+        _effective_planar_rotation_step_deg(request),
     )
     if request.flat_only:
         logger.info("Flat-only orientation filtering enabled: part height must equal the minimal original dimension.")
     if request.treat_input_as_single_item:
         logger.info("Rigid-group extraction enabled: the full input STEP will be packed as one item.")
+    if _uses_rigid_assembly_axis_aligned_mode(request):
+        logger.info(
+            "Rigid assembly orientation policy: orientation_policy=%s longest_to_length=%s shortest_to_height=%s",
+            _orientation_policy(request),
+            _longest_to_length(request),
+            _shortest_to_height(request),
+        )
+        logger.info(
+            "Rigid assembly axis mapping enabled: longest model axis -> L, shortest model axis -> H, remaining axis -> W."
+        )
     if request.copies > 1:
         logger.info(
             "Rigid-group copy replication enabled: %d copies of the same input model will be packed.",
             request.copies,
         )
-    if request.planar_rotation_step_deg > 0:
+    if request.planar_rotation_step_deg > 0 and _uses_rigid_assembly_axis_aligned_mode(request):
+        logger.info("planar rotation disabled for rigid assembly axis-aligned mode")
+    elif request.planar_rotation_step_deg > 0:
         logger.info(
             "Experimental planar rotation enabled: rigid items will sample in-plane angles every %s degrees.",
             request.planar_rotation_step_deg,
@@ -495,6 +510,34 @@ def _packing_mode(request: PackingRequest) -> PackingMode:
 
 def _uses_multi_file_items(request: PackingRequest) -> bool:
     return len(request.input_paths) > 1
+
+
+def _uses_rigid_assembly_axis_aligned_mode(request: PackingRequest) -> bool:
+    return (
+        request.treat_input_as_single_item
+        and request.flat_only
+        and not _uses_multi_file_items(request)
+    )
+
+
+def _effective_planar_rotation_step_deg(request: PackingRequest) -> float:
+    if _uses_rigid_assembly_axis_aligned_mode(request):
+        return 0.0
+    return request.planar_rotation_step_deg
+
+
+def _orientation_policy(request: PackingRequest) -> str:
+    if _uses_rigid_assembly_axis_aligned_mode(request):
+        return "assembly_axes_parallel_to_box_axes"
+    return "default"
+
+
+def _longest_to_length(request: PackingRequest) -> bool:
+    return _uses_rigid_assembly_axis_aligned_mode(request)
+
+
+def _shortest_to_height(request: PackingRequest) -> bool:
+    return _uses_rigid_assembly_axis_aligned_mode(request)
 
 
 def _resolve_job_input_path(

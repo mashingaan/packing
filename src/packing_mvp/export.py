@@ -46,6 +46,9 @@ def build_success_result(
         "copies": _copies(constraints),
         "planar_rotation_step_deg": _planar_rotation_step_deg(constraints),
         "packing_mode": _packing_mode(constraints),
+        "orientation_policy": _orientation_policy(constraints),
+        "longest_to_length": _longest_to_length(constraints),
+        "shortest_to_height": _shortest_to_height(constraints),
         "fits": fit_verdict["fits"],
         "does_not_fit": fit_verdict["does_not_fit"],
         "violations": fit_verdict["violations"],
@@ -111,6 +114,9 @@ def build_failure_result(
         "copies": _copies(constraints),
         "planar_rotation_step_deg": _planar_rotation_step_deg(constraints),
         "packing_mode": _packing_mode(constraints),
+        "orientation_policy": _orientation_policy(constraints),
+        "longest_to_length": _longest_to_length(constraints),
+        "shortest_to_height": _shortest_to_height(constraints),
         "fits": fit_verdict["fits"],
         "does_not_fit": resolved_does_not_fit,
         "violations": fit_verdict["violations"],
@@ -349,6 +355,19 @@ def _planar_rotation_step_deg(constraints: dict[str, Any]) -> float:
     if isinstance(value, (int, float)):
         return float(value)
     return 0.0
+
+
+def _orientation_policy(constraints: dict[str, Any]) -> str:
+    value = constraints.get("orientation_policy")
+    return str(value) if value else "default"
+
+
+def _longest_to_length(constraints: dict[str, Any]) -> bool:
+    return bool(constraints.get("longest_to_length"))
+
+
+def _shortest_to_height(constraints: dict[str, Any]) -> bool:
+    return bool(constraints.get("shortest_to_height"))
 
 
 def _used_extents_payload(

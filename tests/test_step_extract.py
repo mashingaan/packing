@@ -38,6 +38,7 @@ class StepExtractTests(unittest.TestCase):
         part = parts[0]
         self.assertEqual(part.part_id, "assembly_0")
         self.assertEqual(part.mode, "rigid_group")
+        self.assertEqual(part.orientation_policy, "assembly_axes_parallel_to_box_axes")
         self.assertEqual(part.dims, (260.0, 60.0, 40.0))
         self.assertEqual(part.bbox_min, (0.0, 0.0, 0.0))
         self.assertEqual(part.bbox_max, (260.0, 60.0, 40.0))

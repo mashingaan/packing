@@ -14,6 +14,7 @@ from packing_mvp.utils import (
     Part,
     SourceSolid,
     build_rigid_group_copy_parts,
+    canonical_rigid_assembly_orientation,
     filter_orientations_flat_only,
     orientation_to_rigid_rotation,
     rotation_matrix_determinant,
@@ -34,6 +35,7 @@ def _rigid_group_part(dims: tuple[float, float, float]) -> Part:
         bbox_min=(0.0, 0.0, 0.0),
         bbox_max=dims,
         mode="rigid_group",
+        orientation_policy="assembly_axes_parallel_to_box_axes",
         source_solids=(
             SourceSolid(tag=1, bbox_min=(0.0, 0.0, 0.0), bbox_max=primary_max),
             SourceSolid(tag=2, bbox_min=secondary_min, bbox_max=secondary_max),
@@ -221,7 +223,7 @@ class PackerBasicTests(unittest.TestCase):
         )
         self.assertTrue(all(placement.part.mode == "rigid_group" for placement in outcome.placements))
 
-    def test_flat_only_planar_rotation_only(self) -> None:
+    def test_flat_only_single_item_disables_planar_rotation_sampling(self) -> None:
         group = _rigid_group_part((100.0, 200.0, 300.0))
 
         orientations = _resolve_allowed_orientations(
@@ -230,12 +232,13 @@ class PackerBasicTests(unittest.TestCase):
             planar_rotation_step_deg=90.0,
         )
 
-        self.assertEqual([candidate.planar_angle_deg for candidate in orientations], [0.0, 90.0, 180.0, 270.0])
-        self.assertEqual({candidate.rot for candidate in orientations}, {"YZX"})
-        self.assertTrue(all(abs(candidate.dims[2] - 100.0) <= 1e-6 for candidate in orientations))
+        self.assertEqual(len(orientations), 1)
+        self.assertEqual([candidate.planar_angle_deg for candidate in orientations], [0.0])
+        self.assertEqual([candidate.rot for candidate in orientations], ["ZYX"])
+        self.assertEqual([candidate.dims for candidate in orientations], [(300.0, 200.0, 100.0)])
 
     def test_flat_only_single_item_uses_one_base_orientation_without_planar_step(self) -> None:
-        group = _rigid_group_part((300.0, 200.0, 100.0))
+        group = _rigid_group_part((10000.0, 900.0, 300.0))
 
         orientations = _resolve_allowed_orientations(
             group,
@@ -246,7 +249,32 @@ class PackerBasicTests(unittest.TestCase):
         self.assertEqual(len(orientations), 1)
         self.assertEqual(orientations[0].rot, "XYZ")
         self.assertEqual(orientations[0].planar_angle_deg, 0.0)
-        self.assertEqual(orientations[0].dims, (300.0, 200.0, 100.0))
+        self.assertEqual(orientations[0].dims, (10000.0, 900.0, 300.0))
+
+    def test_canonical_rigid_assembly_orientation_maps_longest_middle_shortest(self) -> None:
+        rot, dims = canonical_rigid_assembly_orientation((900.0, 300.0, 10000.0))
+
+        self.assertEqual(rot, "ZXY")
+        self.assertEqual(dims, (10000.0, 900.0, 300.0))
+
+    def test_single_item_ladder_like_model_stays_axis_aligned(self) -> None:
+        group = _rigid_group_part((10000.0, 900.0, 300.0))
+
+        outcome = pack_parts(
+            parts=[group],
+            max_w=1200.0,
+            max_h=500.0,
+            max_l=11000.0,
+            gap=10.0,
+            flat_only=True,
+            planar_rotation_step_deg=5.0,
+        )
+
+        self.assertEqual(len(outcome.placements), 1)
+        placement = outcome.placements[0]
+        self.assertEqual(placement.rot, "XYZ")
+        self.assertEqual(placement.planar_angle_deg, 0.0)
+        self.assertEqual((placement.dx, placement.dy, placement.dz), (10000.0, 900.0, 300.0))
 
     def test_planar_angle_sampling(self) -> None:
         self.assertEqual(sample_planar_angles(5.0), [float(value) for value in range(0, 360, 5)])

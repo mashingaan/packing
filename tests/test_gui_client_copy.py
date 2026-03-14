@@ -241,7 +241,7 @@ class GuiBehaviorTests(unittest.TestCase):
             showerror.assert_called_once()
             self.assertGreaterEqual(len(showerror.call_args.args), 2)
             self.assertIn("10284 / 10000", showerror.call_args.args[1])
-            self.assertNotIn("Р’СЃРµ РґРµС‚Р°Р»Рё РїРѕРјРµС‰Р°СЋС‚СЃСЏ", app.status_var.get())
+            self.assertNotIn("Все детали помещаются", app.status_var.get())
             self.assertIn("10284 / 10000", app.status_var.get())
         finally:
             app.destroy()
