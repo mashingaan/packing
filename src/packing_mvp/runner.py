@@ -16,9 +16,10 @@ from packing_mvp.export import (
     write_result_json,
 )
 from packing_mvp.packer import DoesNotFitError, PackingError, pack_parts
-from packing_mvp.step_export import PackingMode, export_arranged_step
+from packing_mvp.strategies import USER_PACKING_MODES, resolve_packing_strategy
+from packing_mvp.strategies.base import RequestedPackingMode, ResolvedPackingStrategy
+from packing_mvp.step_export import export_arranged_step
 from packing_mvp.step_extract import (
-    extract_parts_from_step,
     extract_parts_from_step_files,
 )
 from packing_mvp.step_merge import merge_step_files
@@ -27,7 +28,6 @@ from packing_mvp.utils import (
     Placement,
     Part,
     build_logger,
-    build_rigid_group_copy_parts,
     ceil_mm,
     close_logger,
     ensure_directory,
@@ -49,6 +49,7 @@ class PackingRequest:
     scale: float = 1.0
     seed: int = 42
     step_units: Literal["packed", "source"] = "packed"
+    packing_mode: RequestedPackingMode | None = None
     flat_only: bool = False
     treat_input_as_single_item: bool = False
     copies: int = 1
@@ -62,6 +63,8 @@ class PackingRequest:
             normalized_inputs = (primary_input,)
         object.__setattr__(self, "input_path", normalized_inputs[0])
         object.__setattr__(self, "input_paths", normalized_inputs)
+        if self.packing_mode is not None and self.packing_mode not in USER_PACKING_MODES:
+            raise ValueError(f"Unsupported packing_mode: {self.packing_mode}")
         if self.copies < 1:
             raise ValueError("copies must be at least 1.")
         if self.planar_rotation_step_deg < 0:
@@ -110,16 +113,17 @@ def run_packing_job(
         raise ValueError("preloaded_parts and preloaded_units must be provided together.")
 
     artifacts = _prepare_artifacts(request)
-    constraints = _build_constraints(request)
-    packing_mode = _packing_mode(request)
+    strategy = resolve_packing_strategy(request)
+    constraints = _build_constraints(request, strategy)
+    packing_mode = strategy.packing_mode
     logger = build_logger(artifacts.log_path, with_console=with_console)
     parts: list[Part] = list(preloaded_parts or [])
     units = None
     outcome = None
 
     try:
-        _log_request(logger, request)
-        _validate_request_modes(request)
+        _log_request(logger, request, strategy)
+        _validate_request_modes(request, strategy)
 
         with TemporaryDirectory(prefix="packing-mvp-") as temp_dir:
             job_input_path: Path | None = None
@@ -139,17 +143,16 @@ def run_packing_job(
                         logger=logger,
                         status_callback=status_callback,
                     )
-                    parts, units = extract_parts_from_step(
+                    parts, units = strategy.extract_parts(
                         input_path=job_input_path,
                         scale=request.scale,
-                        treat_input_as_single_item=request.treat_input_as_single_item,
                         logger=logger,
                     )
             else:
                 units = dict(preloaded_units)
                 logger.info("Using preloaded STEP data: %d items", len(parts))
 
-            parts = _expand_requested_copies(parts, request=request)
+            parts = strategy.expand_parts(parts, copies=request.copies)
 
             _notify(status_callback, "Укладка деталей...")
             outcome = pack_parts(
@@ -159,13 +162,14 @@ def run_packing_job(
                 max_l=request.max_l,
                 gap=request.gap,
                 seed=request.seed,
-                flat_only=request.flat_only,
-                planar_rotation_step_deg=_effective_planar_rotation_step_deg(request),
+                flat_only=strategy.flat_only,
+                planar_rotation_step_deg=strategy.planar_rotation_step_deg,
                 logger=logger,
             )
             _validate_outcome_within_request(
                 outcome=outcome,
                 request=request,
+                strategy=strategy,
                 constraints=constraints,
                 logger=logger,
             )
@@ -336,11 +340,12 @@ def create_failure_run_result(
     n_parts: int = 0,
 ) -> PackingRunResult:
     artifacts = _prepare_artifacts(request)
-    constraints = _build_constraints(request)
+    strategy = resolve_packing_strategy(request)
+    constraints = _build_constraints(request, strategy)
     logger = build_logger(artifacts.log_path, with_console=with_console)
 
     try:
-        _log_request(logger, request)
+        _log_request(logger, request, strategy)
         return _build_failure_run_result(
             artifacts=artifacts,
             constraints=constraints,
@@ -374,31 +379,38 @@ def _prepare_artifacts(request: PackingRequest) -> PackingArtifacts:
     )
 
 
-def _build_constraints(request: PackingRequest) -> dict[str, Any]:
+def _build_constraints(
+    request: PackingRequest,
+    strategy: ResolvedPackingStrategy,
+) -> dict[str, Any]:
     return {
         "maxW": request.max_w,
         "maxH": request.max_h,
         "maxL": request.max_l,
         "gap": request.gap,
         "seed": request.seed,
-        "flat_only": request.flat_only,
-        "treat_input_as_single_item": request.treat_input_as_single_item,
+        "flat_only": strategy.flat_only,
+        "treat_input_as_single_item": strategy.treat_input_as_single_item,
         "copies": request.copies,
-        "planar_rotation_step_deg": _effective_planar_rotation_step_deg(request),
-        "packing_mode": _packing_mode(request),
-        "orientation_policy": _orientation_policy(request),
-        "longest_to_length": _longest_to_length(request),
-        "shortest_to_height": _shortest_to_height(request),
+        "planar_rotation_step_deg": strategy.planar_rotation_step_deg,
+        "packing_mode": strategy.packing_mode,
+        "orientation_policy": strategy.orientation_policy,
+        "longest_to_length": strategy.longest_to_length,
+        "shortest_to_height": strategy.shortest_to_height,
     }
 
 
-def _log_request(logger: Any, request: PackingRequest) -> None:
+def _log_request(
+    logger: Any,
+    request: PackingRequest,
+    strategy: ResolvedPackingStrategy,
+) -> None:
     logger.info("Starting packer")
     logger.info("Input count=%s", len(request.input_paths))
     for index, input_path in enumerate(request.input_paths, start=1):
         logger.info("Input[%d]=%s", index, input_path)
     logger.info(
-        "Constraints: maxW=%s maxH=%s maxL=%s gap=%s scale=%s seed=%s stepUnits=%s flatOnly=%s treatInputAsSingleItem=%s copies=%s planarRotationStepDeg=%s",
+        "Constraints: maxW=%s maxH=%s maxL=%s gap=%s scale=%s seed=%s stepUnits=%s requestedPackingMode=%s legacyFlatOnly=%s legacyTreatInputAsSingleItem=%s copies=%s requestedPlanarRotationStepDeg=%s",
         request.max_w,
         request.max_h,
         request.max_l,
@@ -406,21 +418,24 @@ def _log_request(logger: Any, request: PackingRequest) -> None:
         request.scale,
         request.seed,
         request.step_units,
+        request.packing_mode,
         request.flat_only,
         request.treat_input_as_single_item,
         request.copies,
-        _effective_planar_rotation_step_deg(request),
+        request.planar_rotation_step_deg,
     )
-    if request.flat_only:
+    logger.info("Resolved packing mode: %s", strategy.packing_mode)
+    logger.info("Resolved packing strategy: %s", strategy.description)
+    if strategy.flat_only:
         logger.info("Flat-only orientation filtering enabled: part height must equal the minimal original dimension.")
-    if request.treat_input_as_single_item:
+    if strategy.treat_input_as_single_item:
         logger.info("Rigid-group extraction enabled: the full input STEP will be packed as one item.")
-    if _uses_rigid_assembly_axis_aligned_mode(request):
+    if strategy.longest_to_length and strategy.shortest_to_height:
         logger.info(
             "Rigid assembly orientation policy: orientation_policy=%s longest_to_length=%s shortest_to_height=%s",
-            _orientation_policy(request),
-            _longest_to_length(request),
-            _shortest_to_height(request),
+            strategy.orientation_policy,
+            strategy.longest_to_length,
+            strategy.shortest_to_height,
         )
         logger.info(
             "Rigid assembly axis mapping enabled: longest model axis -> L, shortest model axis -> H, remaining axis -> W."
@@ -430,12 +445,12 @@ def _log_request(logger: Any, request: PackingRequest) -> None:
             "Rigid-group copy replication enabled: %d copies of the same input model will be packed.",
             request.copies,
         )
-    if request.planar_rotation_step_deg > 0 and _uses_rigid_assembly_axis_aligned_mode(request):
-        logger.info("planar rotation disabled for rigid assembly axis-aligned mode")
+    if request.planar_rotation_step_deg > 0 and strategy.planar_rotation_step_deg <= EPS:
+        logger.info("planar rotation disabled for resolved packing mode %s", strategy.packing_mode)
     elif request.planar_rotation_step_deg > 0:
         logger.info(
             "Experimental planar rotation enabled: rigid items will sample in-plane angles every %s degrees.",
-            request.planar_rotation_step_deg,
+            strategy.planar_rotation_step_deg,
         )
     if _uses_multi_file_items(request):
         logger.info("Multi-file item mode enabled: each selected STEP file will be packed as one item.")
@@ -502,42 +517,8 @@ def _cleanup_failed_artifacts(*, artifacts: PackingArtifacts, does_not_fit: bool
         artifacts.placements_path.unlink(missing_ok=True)
 
 
-def _packing_mode(request: PackingRequest) -> PackingMode:
-    if _uses_multi_file_items(request):
-        return "multi_root_shapes"
-    return "single_root_shape" if request.treat_input_as_single_item else "solids"
-
-
 def _uses_multi_file_items(request: PackingRequest) -> bool:
     return len(request.input_paths) > 1
-
-
-def _uses_rigid_assembly_axis_aligned_mode(request: PackingRequest) -> bool:
-    return (
-        request.treat_input_as_single_item
-        and request.flat_only
-        and not _uses_multi_file_items(request)
-    )
-
-
-def _effective_planar_rotation_step_deg(request: PackingRequest) -> float:
-    if _uses_rigid_assembly_axis_aligned_mode(request):
-        return 0.0
-    return request.planar_rotation_step_deg
-
-
-def _orientation_policy(request: PackingRequest) -> str:
-    if _uses_rigid_assembly_axis_aligned_mode(request):
-        return "assembly_axes_parallel_to_box_axes"
-    return "default"
-
-
-def _longest_to_length(request: PackingRequest) -> bool:
-    return _uses_rigid_assembly_axis_aligned_mode(request)
-
-
-def _shortest_to_height(request: PackingRequest) -> bool:
-    return _uses_rigid_assembly_axis_aligned_mode(request)
 
 
 def _resolve_job_input_path(
@@ -594,35 +575,25 @@ def _render_preview_gif_best_effort(
         return None
 
 
-def _validate_request_modes(request: PackingRequest) -> None:
-    if request.copies > 1 and not request.treat_input_as_single_item:
-        raise RuntimeError("--copies requires --treat-input-as-single-item.")
+def _validate_request_modes(
+    request: PackingRequest,
+    strategy: ResolvedPackingStrategy,
+) -> None:
+    if request.copies > 1 and not strategy.treat_input_as_single_item:
+        raise RuntimeError("--copies requires single_root_shape or flat_assembly_footprint packing.")
     if request.copies > 1 and _uses_multi_file_items(request):
         raise RuntimeError("--copies is not supported when multiple input STEP files are provided.")
-    if request.planar_rotation_step_deg > 0 and not request.treat_input_as_single_item:
-        raise RuntimeError("--planar-rotation-step-deg requires --treat-input-as-single-item.")
-    if request.planar_rotation_step_deg > 0 and not request.flat_only:
-        raise RuntimeError("--planar-rotation-step-deg requires --flat-only.")
-
-
-def _expand_requested_copies(
-    parts: list[Part],
-    *,
-    request: PackingRequest,
-) -> list[Part]:
-    if request.copies == 1 or not request.treat_input_as_single_item:
-        return list(parts)
-    if len(parts) != 1:
-        raise RuntimeError(
-            f"Expected exactly one rigid item before copy expansion, got {len(parts)}."
-        )
-    return build_rigid_group_copy_parts(parts[0], request.copies)
+    if request.planar_rotation_step_deg > 0 and not strategy.treat_input_as_single_item:
+        raise RuntimeError("--planar-rotation-step-deg requires single_root_shape or flat_assembly_footprint packing.")
+    if request.planar_rotation_step_deg > 0 and not strategy.flat_only:
+        raise RuntimeError("--planar-rotation-step-deg requires flat-only packing.")
 
 
 def _validate_outcome_within_request(
     *,
     outcome: Any,
     request: PackingRequest,
+    strategy: ResolvedPackingStrategy,
     constraints: dict[str, Any],
     logger: Any,
 ) -> dict[str, Any]:
@@ -648,7 +619,7 @@ def _validate_outcome_within_request(
             raise DoesNotFitError(_limit_exceeded_message("W", actual_width, allowed_width))
         if placement.z + placement.dz > request.max_h - request.gap + EPS:
             raise DoesNotFitError(_limit_exceeded_message("H", actual_height, allowed_height))
-        if request.flat_only and abs(placement.dz - min(placement.part.dims)) > EPS:
+        if strategy.flat_only and abs(placement.dz - min(placement.part.dims)) > EPS:
             raise RuntimeError(f"Placement {placement.part_id} violates the flat-only constraint.")
     return fit_verdict
 

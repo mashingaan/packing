@@ -202,7 +202,7 @@ The build now produces:
 - `dist-installer\PackingMVP-Setup.exe`
 - `dist-installer\PackingMVP-Setup.exe.sha256`
 
-Publish a GitHub Release with a version tag like `v0.4.0` and upload both files. Once the client starts the packaged app, it can detect and install that release without manually sending a new setup file.
+Publish a GitHub Release with a version tag like `v0.4.2` and upload both files. Once the client starts the packaged app, it can detect and install that release without manually sending a new setup file.
 
 ### GitHub Actions Release
 
@@ -219,8 +219,8 @@ It does the following on `v*` tags:
 
 You can use it in two ways:
 
-1. Update `src/packing_mvp/__init__.py` to the target version, commit, and push a tag like `v0.4.0`.
-2. Or start the workflow manually in GitHub Actions and pass a tag like `v0.4.0`; the workflow will create the tag on the selected commit if it does not exist yet.
+1. Update `src/packing_mvp/__init__.py` to the target version, commit, and push a tag like `v0.4.2`.
+2. Or start the workflow manually in GitHub Actions and pass a tag like `v0.4.2`; the workflow will create the tag on the selected commit if it does not exist yet.
 
 ## Tests
 

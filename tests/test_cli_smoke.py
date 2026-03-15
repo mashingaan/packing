@@ -62,6 +62,7 @@ def _fake_extract(
     input_path: Path,
     scale: float = 1.0,
     treat_input_as_single_item: bool = False,
+    orientation_policy: str = "default",
     logger=None,
 ):
     parts = _rigid_group_parts() if treat_input_as_single_item else _solid_parts()
@@ -119,7 +120,7 @@ class CliSmokeTests(unittest.TestCase):
 
             with patch.object(sys, "stdout", stdout_stream):
                 with patch.object(sys, "stderr", stderr_stream):
-                    with patch("packing_mvp.runner.extract_parts_from_step", side_effect=_fake_extract):
+                    with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
                         with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
                             with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
                                 with patch(
@@ -154,7 +155,7 @@ class CliSmokeTests(unittest.TestCase):
             out_dir = tmp_path / "out"
             input_path.write_text("dummy", encoding="utf-8")
 
-            with patch("packing_mvp.runner.extract_parts_from_step", side_effect=_fake_extract):
+            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
                 with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
                     with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
                         with patch(
@@ -210,7 +211,7 @@ class CliSmokeTests(unittest.TestCase):
             out_dir = tmp_path / "out"
             input_path.write_text("dummy", encoding="utf-8")
 
-            with patch("packing_mvp.runner.extract_parts_from_step", side_effect=_fake_extract):
+            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
                 with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
                     with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
                         with patch(
@@ -258,7 +259,7 @@ class CliSmokeTests(unittest.TestCase):
             out_dir = tmp_path / "out"
             input_path.write_text("dummy", encoding="utf-8")
 
-            with patch("packing_mvp.runner.extract_parts_from_step", side_effect=_fake_extract):
+            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
                 with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
                     with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
                         with patch(
@@ -284,19 +285,19 @@ class CliSmokeTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             export_mock.assert_called_once()
-            self.assertEqual(export_mock.call_args.kwargs["packing_mode"], "single_root_shape")
+            self.assertEqual(export_mock.call_args.kwargs["packing_mode"], "flat_assembly_footprint")
 
             result = json.loads((out_dir / "result.json").read_text(encoding="utf-8"))
             self.assertEqual(result["status"], "ok")
             self.assertEqual(result["stats"]["packed"], 1)
             self.assertTrue(result["constraints"]["treat_input_as_single_item"])
-            self.assertEqual(result["constraints"]["orientation_policy"], "assembly_axes_parallel_to_box_axes")
+            self.assertEqual(result["constraints"]["orientation_policy"], "flat_assembly_footprint")
             self.assertTrue(result["constraints"]["longest_to_length"])
             self.assertTrue(result["constraints"]["shortest_to_height"])
             self.assertTrue(result["treat_input_as_single_item"])
             self.assertTrue(result["flat_only"])
-            self.assertEqual(result["packing_mode"], "single_root_shape")
-            self.assertEqual(result["orientation_policy"], "assembly_axes_parallel_to_box_axes")
+            self.assertEqual(result["packing_mode"], "flat_assembly_footprint")
+            self.assertEqual(result["orientation_policy"], "flat_assembly_footprint")
             self.assertTrue(result["longest_to_length"])
             self.assertTrue(result["shortest_to_height"])
 
@@ -313,7 +314,7 @@ class CliSmokeTests(unittest.TestCase):
             out_dir = tmp_path / "out"
             input_path.write_text("dummy", encoding="utf-8")
 
-            with patch("packing_mvp.runner.extract_parts_from_step", side_effect=_fake_extract):
+            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
                 with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
                     with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
                         with patch(
@@ -344,14 +345,15 @@ class CliSmokeTests(unittest.TestCase):
                             )
 
             self.assertEqual(exit_code, 0)
-            self.assertEqual(export_mock.call_args.kwargs["packing_mode"], "single_root_shape")
+            self.assertEqual(export_mock.call_args.kwargs["packing_mode"], "flat_assembly_footprint")
 
             result = json.loads((out_dir / "result.json").read_text(encoding="utf-8"))
             self.assertEqual(result["status"], "ok")
             self.assertEqual(result["copies"], 5)
             self.assertEqual(result["planar_rotation_step_deg"], 0.0)
             self.assertEqual(result["stats"]["packed"], 5)
-            self.assertEqual(result["orientation_policy"], "assembly_axes_parallel_to_box_axes")
+            self.assertEqual(result["packing_mode"], "flat_assembly_footprint")
+            self.assertEqual(result["orientation_policy"], "flat_assembly_footprint")
             self.assertTrue(result["longest_to_length"])
             self.assertTrue(result["shortest_to_height"])
 
@@ -363,7 +365,46 @@ class CliSmokeTests(unittest.TestCase):
             self.assertTrue(all(row["planar_angle_deg"] == "0.000" for row in rows))
 
             log_text = (out_dir / "packing.log").read_text(encoding="utf-8")
-            self.assertIn("planar rotation disabled for rigid assembly axis-aligned mode", log_text)
+            self.assertIn("planar rotation disabled for resolved packing mode flat_assembly_footprint", log_text)
+
+    def test_cli_accepts_explicit_flat_assembly_packing_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            input_path = tmp_path / "dummy.step"
+            out_dir = tmp_path / "out"
+            input_path.write_text("dummy", encoding="utf-8")
+
+            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
+                with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
+                    with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
+                        with patch(
+                            "packing_mvp.runner.export_arranged_step",
+                            side_effect=_fake_export_arranged_step,
+                        ) as export_mock:
+                            exit_code = main(
+                                [
+                                    "--input",
+                                    str(input_path),
+                                    "--out",
+                                    str(out_dir),
+                                    "--maxW",
+                                    "1000",
+                                    "--maxH",
+                                    "1000",
+                                    "--gap",
+                                    "10",
+                                    "--packing-mode",
+                                    "flat_assembly_footprint",
+                                ]
+                            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(export_mock.call_args.kwargs["packing_mode"], "flat_assembly_footprint")
+
+            result = json.loads((out_dir / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["packing_mode"], "flat_assembly_footprint")
+            self.assertTrue(result["flat_only"])
+            self.assertTrue(result["treat_input_as_single_item"])
 
 
 if __name__ == "__main__":

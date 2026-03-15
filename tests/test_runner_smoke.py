@@ -84,6 +84,7 @@ def _fake_extract(
     input_path: Path,
     scale: float = 1.0,
     treat_input_as_single_item: bool = False,
+    orientation_policy: str = "default",
     logger=None,
 ):
     return (
@@ -224,7 +225,7 @@ class RunnerSmokeTests(unittest.TestCase):
             out_dir = tmp_path / "out"
             input_path.write_text("dummy", encoding="utf-8")
 
-            with patch("packing_mvp.runner.extract_parts_from_step", side_effect=_fake_extract):
+            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
                 with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
                     with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
                         with patch(
@@ -276,7 +277,7 @@ class RunnerSmokeTests(unittest.TestCase):
             input_path.write_text("dummy", encoding="utf-8")
             messages: list[str] = []
 
-            with patch("packing_mvp.runner.extract_parts_from_step") as extract_mock:
+            with patch("packing_mvp.strategies.base.extract_parts_from_step") as extract_mock:
                 with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
                     with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
                         with patch(
@@ -316,7 +317,7 @@ class RunnerSmokeTests(unittest.TestCase):
             out_dir = tmp_path / "out"
             input_path.write_text("dummy", encoding="utf-8")
 
-            with patch("packing_mvp.runner.extract_parts_from_step", side_effect=_fake_extract):
+            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
                 with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
                     with patch("packing_mvp.runner.render_preview_gif", side_effect=RuntimeError("gif failed")):
                         with patch(
@@ -350,7 +351,7 @@ class RunnerSmokeTests(unittest.TestCase):
             out_dir = tmp_path / "out"
             input_path.write_text("dummy", encoding="utf-8")
 
-            with patch("packing_mvp.runner.extract_parts_from_step", side_effect=_fake_extract):
+            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
                 with patch("packing_mvp.runner.export_arranged_step", side_effect=RuntimeError("step export failed")):
                     result = run_packing_job(
                         PackingRequest(
@@ -423,14 +424,14 @@ class RunnerSmokeTests(unittest.TestCase):
             self.assertEqual(result_json["packing_mode"], "multi_root_shapes")
             self.assertIn("Деталей: 2", format_result_summary(result_json))
 
-    def test_run_packing_job_uses_single_root_shape_export_when_requested(self) -> None:
+    def test_run_packing_job_legacy_flat_rigid_flags_resolve_to_flat_footprint_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             input_path = tmp_path / "dummy.step"
             out_dir = tmp_path / "out"
             input_path.write_text("dummy", encoding="utf-8")
 
-            with patch("packing_mvp.runner.extract_parts_from_step", side_effect=_fake_extract):
+            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
                 with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
                     with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
                         with patch(
@@ -452,7 +453,7 @@ class RunnerSmokeTests(unittest.TestCase):
                             )
 
             self.assertEqual(result.exit_code, 0)
-            self.assertEqual(export_mock.call_args.kwargs["packing_mode"], "single_root_shape")
+            self.assertEqual(export_mock.call_args.kwargs["packing_mode"], "flat_assembly_footprint")
             self.assertTrue((out_dir / "arranged.step").exists())
 
             result_json = json.loads(result.result_path.read_text(encoding="utf-8"))
@@ -460,12 +461,12 @@ class RunnerSmokeTests(unittest.TestCase):
             self.assertEqual(result_json["stats"]["packed"], 1)
             self.assertTrue(result_json["constraints"]["flat_only"])
             self.assertTrue(result_json["constraints"]["treat_input_as_single_item"])
-            self.assertEqual(result_json["constraints"]["orientation_policy"], "assembly_axes_parallel_to_box_axes")
+            self.assertEqual(result_json["constraints"]["orientation_policy"], "flat_assembly_footprint")
             self.assertTrue(result_json["constraints"]["longest_to_length"])
             self.assertTrue(result_json["constraints"]["shortest_to_height"])
             self.assertTrue(result_json["treat_input_as_single_item"])
-            self.assertEqual(result_json["packing_mode"], "single_root_shape")
-            self.assertEqual(result_json["orientation_policy"], "assembly_axes_parallel_to_box_axes")
+            self.assertEqual(result_json["packing_mode"], "flat_assembly_footprint")
+            self.assertEqual(result_json["orientation_policy"], "flat_assembly_footprint")
             self.assertTrue(result_json["longest_to_length"])
             self.assertTrue(result_json["shortest_to_height"])
 
@@ -478,14 +479,14 @@ class RunnerSmokeTests(unittest.TestCase):
             self.assertEqual(len(placement_lines), 2)
             self.assertTrue(placement_lines[1].startswith("assembly_0,rigid_group,0,"))
 
-    def test_run_packing_job_writes_one_rigid_row_per_copy(self) -> None:
+    def test_flat_assembly_multi_copy_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             input_path = tmp_path / "dummy.step"
             out_dir = tmp_path / "out"
             input_path.write_text("dummy", encoding="utf-8")
 
-            with patch("packing_mvp.runner.extract_parts_from_step", side_effect=_fake_extract):
+            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
                 with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
                     with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
                         with patch(
@@ -510,7 +511,7 @@ class RunnerSmokeTests(unittest.TestCase):
                             )
 
             self.assertEqual(result.exit_code, 0)
-            self.assertEqual(export_mock.call_args.kwargs["packing_mode"], "single_root_shape")
+            self.assertEqual(export_mock.call_args.kwargs["packing_mode"], "flat_assembly_footprint")
 
             result_json = json.loads(result.result_path.read_text(encoding="utf-8"))
             self.assertEqual(result_json["status"], "ok")
@@ -523,7 +524,8 @@ class RunnerSmokeTests(unittest.TestCase):
             self.assertEqual(result_json["planar_rotation_step_deg"], 0.0)
             self.assertEqual(result_json["constraints"]["copies"], 5)
             self.assertEqual(result_json["constraints"]["planar_rotation_step_deg"], 0.0)
-            self.assertEqual(result_json["orientation_policy"], "assembly_axes_parallel_to_box_axes")
+            self.assertEqual(result_json["packing_mode"], "flat_assembly_footprint")
+            self.assertEqual(result_json["orientation_policy"], "flat_assembly_footprint")
             self.assertTrue(result_json["longest_to_length"])
             self.assertTrue(result_json["shortest_to_height"])
 
@@ -547,7 +549,7 @@ class RunnerSmokeTests(unittest.TestCase):
             self.assertTrue(all(row["planar_angle_deg"] == "0.000" for row in rows))
 
             log_text = result.log_path.read_text(encoding="utf-8")
-            self.assertIn("planar rotation disabled for rigid assembly axis-aligned mode", log_text)
+            self.assertIn("planar rotation disabled for resolved packing mode flat_assembly_footprint", log_text)
 
     def test_run_packing_job_fails_when_final_length_exceeds_max_length(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -556,7 +558,7 @@ class RunnerSmokeTests(unittest.TestCase):
             out_dir = tmp_path / "out"
             input_path.write_text("dummy", encoding="utf-8")
 
-            with patch("packing_mvp.runner.extract_parts_from_step", side_effect=_fake_extract):
+            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
                 with patch("packing_mvp.runner.pack_parts", side_effect=_fake_pack_outcome_with_length_overrun):
                     with patch("packing_mvp.runner.render_previews") as render_mock:
                         with patch("packing_mvp.runner.render_preview_gif") as gif_mock:
@@ -621,7 +623,7 @@ class RunnerSmokeTests(unittest.TestCase):
             out_dir = tmp_path / "out"
             input_path.write_text("dummy", encoding="utf-8")
 
-            with patch("packing_mvp.runner.extract_parts_from_step", side_effect=_fake_extract):
+            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
                 with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
                     with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
                         with patch(
@@ -676,7 +678,7 @@ class RunnerSmokeTests(unittest.TestCase):
             out_dir = tmp_path / "out"
             input_path.write_text("dummy", encoding="utf-8")
 
-            with patch("packing_mvp.runner.extract_parts_from_step", side_effect=_fake_extract):
+            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
                 result = run_packing_job(
                     PackingRequest(
                         input_path=input_path,
@@ -702,6 +704,39 @@ class RunnerSmokeTests(unittest.TestCase):
             self.assertFalse((out_dir / "arranged.step").exists())
             self.assertFalse((out_dir / "placements.csv").exists())
             self.assertIn("does not fit", result_json["error"])
+
+    def test_run_packing_job_explicit_flat_mode_resolves_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            input_path = tmp_path / "dummy.step"
+            out_dir = tmp_path / "out"
+            input_path.write_text("dummy", encoding="utf-8")
+
+            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
+                with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
+                    with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
+                        with patch(
+                            "packing_mvp.runner.export_arranged_step",
+                            side_effect=_fake_export_arranged_step,
+                        ) as export_mock:
+                            result = run_packing_job(
+                                PackingRequest(
+                                    input_path=input_path,
+                                    out_dir=out_dir,
+                                    max_w=1000.0,
+                                    max_h=1000.0,
+                                    gap=10.0,
+                                    packing_mode="flat_assembly_footprint",
+                                ),
+                                with_console=False,
+                            )
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(export_mock.call_args.kwargs["packing_mode"], "flat_assembly_footprint")
+            result_json = json.loads(result.result_path.read_text(encoding="utf-8"))
+            self.assertEqual(result_json["packing_mode"], "flat_assembly_footprint")
+            self.assertTrue(result_json["flat_only"])
+            self.assertTrue(result_json["treat_input_as_single_item"])
 
     def test_run_packing_job_in_subprocess_emits_status_and_result(self) -> None:
         request = PackingRequest(

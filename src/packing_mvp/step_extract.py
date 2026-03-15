@@ -10,6 +10,7 @@ def extract_parts_from_step(
     input_path: Path,
     scale: float = 1.0,
     treat_input_as_single_item: bool = False,
+    orientation_policy: str = "assembly_axes_parallel_to_box_axes",
     logger: Any | None = None,
 ) -> tuple[list[Part], dict[str, Any]]:
     try:
@@ -90,6 +91,7 @@ def extract_parts_from_step(
         parts = build_parts_from_scaled_solids(
             scaled_solids,
             treat_input_as_single_item=treat_input_as_single_item,
+            orientation_policy=orientation_policy,
         )
 
         if logger:
@@ -213,6 +215,7 @@ def build_parts_from_scaled_solids(
     scaled_solids: Sequence[SourceSolid],
     *,
     treat_input_as_single_item: bool = False,
+    orientation_policy: str = "assembly_axes_parallel_to_box_axes",
 ) -> list[Part]:
     solids = tuple(scaled_solids)
     if not solids:
@@ -249,7 +252,7 @@ def build_parts_from_scaled_solids(
             bbox_min=bbox_min,
             bbox_max=bbox_max,
             mode="rigid_group",
-            orientation_policy="assembly_axes_parallel_to_box_axes",
+            orientation_policy=orientation_policy,
             source_solids=solids,
         )
     ]

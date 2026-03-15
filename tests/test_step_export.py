@@ -647,6 +647,20 @@ class ExportArrangedStepTests(unittest.TestCase):
                     with patch("packing_mvp.step_export._export_arranged_step_multi_root_shapes") as multi_root_mock:
                         export_arranged_step(
                             input_step,
+                            single_root_csv,
+                            output_step,
+                            packing_mode="flat_assembly_footprint",
+                        )
+
+            solids_mock.assert_not_called()
+            single_root_mock.assert_called_once()
+            multi_root_mock.assert_not_called()
+
+            with patch("packing_mvp.step_export._export_arranged_step_solids") as solids_mock:
+                with patch("packing_mvp.step_export._export_arranged_step_single_root_shape") as single_root_mock:
+                    with patch("packing_mvp.step_export._export_arranged_step_multi_root_shapes") as multi_root_mock:
+                        export_arranged_step(
+                            input_step,
                             multi_root_csv,
                             output_step,
                             packing_mode="multi_root_shapes",
@@ -819,6 +833,48 @@ class ExportArrangedStepTests(unittest.TestCase):
 
             self.assertTrue(output_step.exists())
             solids_mock.assert_not_called()
+            writer = _FakeStepControlWriter.last_instance
+            self.assertIsNotNone(writer)
+            assert writer is not None
+            self.assertEqual(len(writer.transferred_shapes), 1)
+            exported = writer.transferred_shapes[0]
+            self.assertEqual(len(exported.children), 5)
+            self.assertEqual(exported.children[0].bbox, (100.0, 200.0, 300.0, 110.0, 220.0, 330.0))
+            self.assertEqual(exported.children[4].bbox, (180.0, 200.0, 300.0, 190.0, 220.0, 330.0))
+
+    def test_flat_assembly_export_keeps_copies_whole(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            input_step = tmp_path / "input.step"
+            input_step.write_text("dummy", encoding="utf-8")
+            placements_csv = _write_csv(
+                tmp_path,
+                """
+                item_id,mode,copy_index,source_count,source_tags,dx,dy,dz,x,y,z,rot,planar_angle_deg,bbox_minx,bbox_miny,bbox_minz,bbox_maxx,bbox_maxy,bbox_maxz
+                assembly_0_copy_000,rigid_group,0,2,"[1, 2]",10,20,30,100,200,300,XYZ,0,100,200,300,110,220,330
+                assembly_0_copy_001,rigid_group,1,2,"[1, 2]",10,20,30,120,200,300,XYZ,0,120,200,300,130,220,330
+                assembly_0_copy_002,rigid_group,2,2,"[1, 2]",10,20,30,140,200,300,XYZ,0,140,200,300,150,220,330
+                assembly_0_copy_003,rigid_group,3,2,"[1, 2]",10,20,30,160,200,300,XYZ,0,160,200,300,170,220,330
+                assembly_0_copy_004,rigid_group,4,2,"[1, 2]",10,20,30,180,200,300,XYZ,0,180,200,300,190,220,330
+                """,
+                "flat_multi_copy.csv",
+            )
+            output_step = tmp_path / "arranged.step"
+
+            with patch(
+                "packing_mvp.step_export._load_ocp_modules",
+                return_value=_fake_ocp_modules(),
+            ):
+                export_arranged_step(
+                    input_step,
+                    placements_csv,
+                    output_step,
+                    scale=1.0,
+                    units_mode="packed",
+                    packing_mode="flat_assembly_footprint",
+                )
+
+            self.assertTrue(output_step.exists())
             writer = _FakeStepControlWriter.last_instance
             self.assertIsNotNone(writer)
             assert writer is not None

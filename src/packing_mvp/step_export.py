@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from packing_mvp.strategies.base import PackingMode
 from packing_mvp.utils import (
     EPS,
     RigidRotation,
@@ -15,7 +16,6 @@ from packing_mvp.utils import (
 )
 
 StepUnitsMode = Literal["packed", "source"]
-PackingMode = Literal["solids", "single_root_shape", "multi_root_shapes"]
 
 _SOLID_PLACEMENT_COLUMNS = (
     "part_id",
@@ -955,6 +955,8 @@ def _shape_is_null(shape: Any) -> bool:
 def _normalize_packing_mode(packing_mode: str) -> PackingMode:
     if packing_mode == "solids":
         return "solids"
+    if packing_mode == "flat_assembly_footprint":
+        return "flat_assembly_footprint"
     if packing_mode in {"single_root_shape", "rigid_group"}:
         return "single_root_shape"
     if packing_mode == "multi_root_shapes":

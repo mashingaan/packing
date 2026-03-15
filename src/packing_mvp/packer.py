@@ -8,12 +8,12 @@ from packing_mvp.utils import (
     EPS,
     Part,
     Placement,
-    canonical_rigid_assembly_orientation,
     canonical_flat_orientation,
     ceil_mm,
     compute_used_extents,
     dims_from_bbox,
     filter_orientations_flat_only,
+    rigid_group_flat_assembly_footprint_dims,
     rigid_group_rotated_bbox,
     sample_planar_angles,
 )
@@ -358,16 +358,32 @@ def _resolve_allowed_orientations(
     flat_only: bool,
     planar_rotation_step_deg: float,
 ) -> list[OrientationCandidate]:
+    if part.mode == "rigid_group" and part.orientation_policy == "flat_assembly_footprint":
+        base_rot, footprint_dims = rigid_group_flat_assembly_footprint_dims(
+            part.source_solids,
+            part.dims,
+        )
+        return [
+            OrientationCandidate(
+                rot=base_rot,
+                dims=footprint_dims,
+                planar_angle_deg=0.0,
+            )
+        ]
+
     if (
         part.mode == "rigid_group"
         and flat_only
         and part.orientation_policy == "assembly_axes_parallel_to_box_axes"
     ):
-        base_rot, _ = canonical_rigid_assembly_orientation(part.dims)
+        base_rot, footprint_dims = rigid_group_flat_assembly_footprint_dims(
+            part.source_solids,
+            part.dims,
+        )
         return [
             OrientationCandidate(
                 rot=base_rot,
-                dims=dims_from_bbox(rigid_group_rotated_bbox(part.source_solids, base_rot)),
+                dims=footprint_dims,
                 planar_angle_deg=0.0,
             )
         ]

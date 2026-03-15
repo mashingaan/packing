@@ -322,10 +322,14 @@ def _packing_mode(constraints: dict[str, Any]) -> str:
     mode = str(constraints.get("packing_mode") or "")
     if mode == "solids":
         return "solids"
+    if mode == "flat_assembly_footprint":
+        return "flat_assembly_footprint"
     if mode == "multi_root_shapes":
         return "multi_root_shapes"
     if mode in {"single_root_shape", "rigid_group"}:
         return "single_root_shape"
+    if _treat_input_as_single_item(constraints) and _flat_only(constraints):
+        return "flat_assembly_footprint"
     return "single_root_shape" if _treat_input_as_single_item(constraints) else "solids"
 
 

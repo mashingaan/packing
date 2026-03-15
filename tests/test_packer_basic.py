@@ -14,9 +14,11 @@ from packing_mvp.utils import (
     Part,
     SourceSolid,
     build_rigid_group_copy_parts,
+    canonical_flat_assembly_orientation,
     canonical_rigid_assembly_orientation,
     filter_orientations_flat_only,
     orientation_to_rigid_rotation,
+    rigid_group_flat_assembly_footprint_dims,
     rotation_matrix_determinant,
     rotation_matrix_is_orthonormal,
     sample_planar_angles,
@@ -40,6 +42,21 @@ def _rigid_group_part(dims: tuple[float, float, float]) -> Part:
             SourceSolid(tag=1, bbox_min=(0.0, 0.0, 0.0), bbox_max=primary_max),
             SourceSolid(tag=2, bbox_min=secondary_min, bbox_max=secondary_max),
         ),
+    )
+
+
+def _flat_assembly_part(dims: tuple[float, float, float]) -> Part:
+    part = _rigid_group_part(dims)
+    return Part(
+        part_id=part.part_id,
+        solid_tag=part.solid_tag,
+        dims=part.dims,
+        volume=part.volume,
+        bbox_min=part.bbox_min,
+        bbox_max=part.bbox_max,
+        mode=part.mode,
+        orientation_policy="flat_assembly_footprint",
+        source_solids=part.source_solids,
     )
 
 
@@ -256,6 +273,19 @@ class PackerBasicTests(unittest.TestCase):
 
         self.assertEqual(rot, "ZXY")
         self.assertEqual(dims, (10000.0, 900.0, 300.0))
+
+    def test_flat_assembly_orientation_policy(self) -> None:
+        rot, dims = canonical_flat_assembly_orientation((900.0, 300.0, 10000.0))
+        flat_part = _flat_assembly_part((900.0, 300.0, 10000.0))
+        footprint_rot, footprint_dims = rigid_group_flat_assembly_footprint_dims(
+            flat_part.source_solids,
+            flat_part.dims,
+        )
+
+        self.assertEqual(rot, "ZXY")
+        self.assertEqual(dims, (10000.0, 900.0, 300.0))
+        self.assertEqual(footprint_rot, "ZXY")
+        self.assertEqual(footprint_dims, (10000.0, 900.0, 300.0))
 
     def test_single_item_ladder_like_model_stays_axis_aligned(self) -> None:
         group = _rigid_group_part((10000.0, 900.0, 300.0))

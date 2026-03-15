@@ -198,7 +198,11 @@ class Part:
     bbox_min: tuple[float, float, float]
     bbox_max: tuple[float, float, float]
     mode: Literal["solid", "rigid_group"] = "solid"
-    orientation_policy: Literal["default", "assembly_axes_parallel_to_box_axes"] = "default"
+    orientation_policy: Literal[
+        "default",
+        "assembly_axes_parallel_to_box_axes",
+        "flat_assembly_footprint",
+    ] = "default"
     source_solids: tuple[SourceSolid, ...] = ()
     source_part_id: str | None = None
     copy_index: int = 0
@@ -206,7 +210,11 @@ class Part:
     def __post_init__(self) -> None:
         if self.mode not in {"solid", "rigid_group"}:
             raise ValueError(f"Unsupported part mode: {self.mode}")
-        if self.orientation_policy not in {"default", "assembly_axes_parallel_to_box_axes"}:
+        if self.orientation_policy not in {
+            "default",
+            "assembly_axes_parallel_to_box_axes",
+            "flat_assembly_footprint",
+        }:
             raise ValueError(f"Unsupported orientation policy: {self.orientation_policy}")
         if self.copy_index < 0:
             raise ValueError("copy_index must be non-negative.")
@@ -381,6 +389,12 @@ def canonical_rigid_assembly_orientation(
     raise ValueError(f"No canonical rigid assembly orientation is available for dims={dims!r}.")
 
 
+def canonical_flat_assembly_orientation(
+    dims: tuple[float, float, float],
+) -> tuple[str, tuple[float, float, float]]:
+    return canonical_rigid_assembly_orientation(dims)
+
+
 def sample_planar_angles(step_deg: float) -> list[float]:
     if step_deg <= EPS:
         return [0.0]
@@ -417,6 +431,28 @@ def rigid_group_rotated_bbox(
         _transform_bbox(_solid_to_bbox(solid), transform_matrix)
         for solid in solids
     )
+
+
+def rigid_group_flat_assembly_footprint_dims(
+    source_solids: Iterable[SourceSolid],
+    dims: tuple[float, float, float],
+) -> tuple[str, tuple[float, float, float]]:
+    rotation_label, _ = canonical_flat_assembly_orientation(dims)
+    matrix = orientation_to_rigid_rotation(rotation_label).matrix
+    transformed_bboxes = [
+        _transform_bbox(_solid_to_bbox(solid), matrix)
+        for solid in source_solids
+    ]
+    if not transformed_bboxes:
+        raise ValueError("Flat-assembly footprint requires at least one source solid.")
+
+    min_x = min(bbox[0] for bbox in transformed_bboxes)
+    min_y = min(bbox[1] for bbox in transformed_bboxes)
+    min_z = min(bbox[2] for bbox in transformed_bboxes)
+    max_x = max(bbox[3] for bbox in transformed_bboxes)
+    max_y = max(bbox[4] for bbox in transformed_bboxes)
+    max_z = max(bbox[5] for bbox in transformed_bboxes)
+    return rotation_label, (max_x - min_x, max_y - min_y, max_z - min_z)
 
 
 def build_rigid_group_copy_parts(part: Part, copies: int) -> list[Part]:

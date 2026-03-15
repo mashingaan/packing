@@ -34,6 +34,18 @@ class ValidationTests(unittest.TestCase):
             ],
         )
 
+    def test_hard_limit_fail_for_excess_length(self) -> None:
+        verdict = validate_constraints(
+            (10284.0, 2400.0, 1800.0),
+            {"maxL": 10000, "maxW": 3000, "maxH": 2000, "gap": 0},
+        )
+
+        self.assertFalse(verdict["fits"])
+        self.assertTrue(verdict["does_not_fit"])
+        self.assertEqual(verdict["violations"][0]["axis"], "L")
+        self.assertEqual(verdict["violations"][0]["actual"], 10284)
+        self.assertEqual(verdict["violations"][0]["max"], 10000)
+
     def test_validation_succeeds_when_within_limits(self) -> None:
         verdict = validate_constraints(
             (9980.0, 2400.0, 1800.0),

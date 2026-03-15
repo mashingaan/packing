@@ -7,6 +7,7 @@ from typing import TextIO
 
 from packing_mvp.presentation import format_result_summary, result_is_successful_fit
 from packing_mvp.runner import PackingRequest, run_packing_job
+from packing_mvp.strategies import USER_PACKING_MODES
 
 
 def _positive_int(value: str) -> int:
@@ -36,6 +37,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gap", required=True, type=float, help="Gap between parts and walls in mm")
     parser.add_argument("--scale", type=float, default=1.0, help="Manual scale multiplier")
     parser.add_argument("--seed", type=int, default=42, help="Deterministic seed for tie-breaking")
+    parser.add_argument(
+        "--packing-mode",
+        choices=USER_PACKING_MODES,
+        default=None,
+        help=(
+            "Packing strategy: solids, single_root_shape, or flat_assembly_footprint. "
+            "If omitted, legacy flags are normalized to one resolved mode."
+        ),
+    )
     parser.add_argument(
         "--flat-only",
         action="store_true",
@@ -114,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
             scale=args.scale,
             seed=args.seed,
             step_units=args.step_units,
+            packing_mode=args.packing_mode,
             flat_only=args.flat_only,
             treat_input_as_single_item=args.treat_input_as_single_item,
             copies=args.copies,
