@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -53,6 +54,8 @@ class GuiClientCopyTests(unittest.TestCase):
 
 class GuiBehaviorTests(unittest.TestCase):
     def _build_app(self) -> PackingGui:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            self.skipTest("Tk GUI smoke tests are skipped on GitHub-hosted runners.")
         try:
             app = PackingGui()
             app.update_idletasks()

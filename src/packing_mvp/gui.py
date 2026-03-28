@@ -141,6 +141,7 @@ class PackingGui(tk.Tk):
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._poll_after_id: str | None = None
         self._dragdrop_after_id: str | None = None
+        self._destroying = False
         self._running = False
         self._advanced_visible = False
         self._selected_item_id: str | None = None
@@ -173,6 +174,7 @@ class PackingGui(tk.Tk):
         self.bind_all("<MouseWheel>", self._handle_global_mousewheel, add="+")
 
     def destroy(self) -> None:
+        self._destroying = True
         if self._poll_after_id is not None:
             try:
                 self.after_cancel(self._poll_after_id)
@@ -712,6 +714,8 @@ class PackingGui(tk.Tk):
 
     def _poll_events(self) -> None:
         self._poll_after_id = None
+        if self._destroying:
+            return
         while True:
             try:
                 event_type, payload = self._events.get_nowait()
@@ -723,7 +727,8 @@ class PackingGui(tk.Tk):
             elif event_type == "done":
                 self._handle_result(payload)
                 break
-        self._poll_after_id = self.after(150, self._poll_events)
+        if not self._destroying:
+            self._poll_after_id = self.after(150, self._poll_events)
 
     def _handle_result(self, result: object) -> None:
         self._set_running(False)

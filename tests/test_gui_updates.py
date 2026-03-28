@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 import tkinter as tk
@@ -16,6 +17,8 @@ from packing_mvp.gui import PackingGui
 
 class GuiUpdateTests(unittest.TestCase):
     def _build_app(self) -> PackingGui:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            self.skipTest("Tk update UI tests are skipped on GitHub-hosted runners.")
         try:
             app = PackingGui()
             app.update()
