@@ -140,6 +140,7 @@ class PackingGui(tk.Tk):
         self._worker: threading.Thread | None = None
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._poll_after_id: str | None = None
+        self._dragdrop_after_id: str | None = None
         self._running = False
         self._advanced_visible = False
         self._selected_item_id: str | None = None
@@ -167,7 +168,7 @@ class PackingGui(tk.Tk):
         self._refresh_catalog()
         self._set_status_banner(NEUTRAL_BANNER)
         self._poll_after_id = self.after(150, self._poll_events)
-        self.after(50, self._configure_dragdrop)
+        self._dragdrop_after_id = self.after(50, self._configure_dragdrop)
         self.bind("<Configure>", self._on_window_configure)
         self.bind_all("<MouseWheel>", self._handle_global_mousewheel, add="+")
 
@@ -175,6 +176,11 @@ class PackingGui(tk.Tk):
         if self._poll_after_id is not None:
             try:
                 self.after_cancel(self._poll_after_id)
+            except tk.TclError:
+                pass
+        if self._dragdrop_after_id is not None:
+            try:
+                self.after_cancel(self._dragdrop_after_id)
             except tk.TclError:
                 pass
         try:
@@ -446,6 +452,7 @@ class PackingGui(tk.Tk):
         self.log_text.pack(fill="both", expand=True, padx=12, pady=12)
 
     def _configure_dragdrop(self) -> None:
+        self._dragdrop_after_id = None
         if windnd is not None:
             try:
                 windnd.hook_dropfiles(self, func=lambda paths: self._apply_input_paths(_pick_step_files(paths)))
