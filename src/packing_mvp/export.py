@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import csv
 import json
+from collections import Counter
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterable, Sequence
 
-from packing_mvp.packer import DoesNotFitError, PackOutcome
-from packing_mvp.utils import Placement, ceil_mm
+from packing_mvp.catalog import CatalogItem
+from packing_mvp.packer import DoesNotFitError, PackOutcome, TruckPackOutcome
+from packing_mvp.utils import Part, Placement, ceil_mm
 
 
 def write_placements_csv(placements: list[Placement], path: Path) -> None:
@@ -32,28 +34,20 @@ def build_success_result(
     fit_verdict = validate_constraints(outcome, constraints)
     if not fit_verdict["fits"]:
         raise DoesNotFitError(format_constraint_failure_message(fit_verdict))
-    packed_volume = sum(
-        placement.dx * placement.dy * placement.dz for placement in outcome.placements
-    )
+    packed_volume = sum(placement.dx * placement.dy * placement.dz for placement in outcome.placements)
     packed_count = len(outcome.placements)
-    unpacked_count = 0
     return {
         "status": "ok",
+        "success": True,
         "input": _build_input_payload(input_paths),
+        "truck": _truck_payload(constraints),
         "constraints": constraints,
-        "treat_input_as_single_item": _treat_input_as_single_item(constraints),
-        "flat_only": _flat_only(constraints),
-        "copies": _copies(constraints),
-        "planar_rotation_step_deg": _planar_rotation_step_deg(constraints),
-        "packing_mode": _packing_mode(constraints),
-        "orientation_policy": _orientation_policy(constraints),
-        "longest_to_length": _longest_to_length(constraints),
-        "shortest_to_height": _shortest_to_height(constraints),
-        "fits": fit_verdict["fits"],
-        "does_not_fit": fit_verdict["does_not_fit"],
-        "violations": fit_verdict["violations"],
-        "limit_exceeded": fit_verdict["limit_exceeded"],
-        "max_package_dims_mm": _max_package_dims(constraints),
+        "fits": True,
+        "does_not_fit": False,
+        "violations": [],
+        "limit_exceeded": None,
+        "placed_items": [_placement_payload(placement) for placement in outcome.placements],
+        "unplaced_items": [],
         "recommended_dims_mm": {
             "L": outcome.recommended_dims[0],
             "W": outcome.recommended_dims[1],
@@ -61,18 +55,19 @@ def build_success_result(
         },
         "used_extents_mm": fit_verdict["used_extents_mm"],
         "packed_count": packed_count,
-        "unpacked_count": unpacked_count,
+        "unpacked_count": 0,
+        "fill_ratio": round(outcome.fill_ratio_bbox, 6),
         "stats": {
             "n_parts": packed_count,
             "packed": packed_count,
-            "unpacked": unpacked_count,
+            "unpacked": 0,
             "fill_ratio_bbox": round(outcome.fill_ratio_bbox, 6),
             "packed_volume_mm3": round(packed_volume, 3),
         },
         "units": {
-            "scale": units["scale"],
+            "scale": units.get("scale"),
             "manual_scale": units.get("manual_scale"),
-            "auto_scale_applied": units["auto_scale_applied"],
+            "auto_scale_applied": units.get("auto_scale_applied", False),
             "auto_scale_factor": units.get("auto_scale_factor"),
         },
     }
@@ -103,38 +98,107 @@ def build_failure_result(
         else max(0, int(n_parts) - resolved_packed_count)
     )
     fit_verdict = validate_constraints(used_extents, constraints)
-    resolved_does_not_fit = bool(does_not_fit or fit_verdict["does_not_fit"])
     return {
         "status": "failed",
+        "success": False,
         "error": message,
         "input": _build_input_payload(input_paths),
+        "truck": _truck_payload(constraints),
         "constraints": constraints,
-        "treat_input_as_single_item": _treat_input_as_single_item(constraints),
-        "flat_only": _flat_only(constraints),
-        "copies": _copies(constraints),
-        "planar_rotation_step_deg": _planar_rotation_step_deg(constraints),
-        "packing_mode": _packing_mode(constraints),
-        "orientation_policy": _orientation_policy(constraints),
-        "longest_to_length": _longest_to_length(constraints),
-        "shortest_to_height": _shortest_to_height(constraints),
-        "fits": fit_verdict["fits"],
-        "does_not_fit": resolved_does_not_fit,
+        "fits": False,
+        "does_not_fit": bool(does_not_fit or resolved_unpacked_count > 0 or fit_verdict["does_not_fit"]),
         "violations": fit_verdict["violations"],
         "limit_exceeded": fit_verdict["limit_exceeded"],
-        "max_package_dims_mm": _max_package_dims(constraints),
+        "placed_items": [],
+        "unplaced_items": [],
         "recommended_dims_mm": {
-            "L": None,
-            "W": None,
-            "H": None,
+            "L": fit_verdict["used_extents_mm"]["L"],
+            "W": fit_verdict["used_extents_mm"]["W"],
+            "H": fit_verdict["used_extents_mm"]["H"],
         },
         "used_extents_mm": fit_verdict["used_extents_mm"],
         "packed_count": resolved_packed_count,
         "unpacked_count": resolved_unpacked_count,
+        "fill_ratio": 0.0,
         "stats": {
             "n_parts": n_parts,
             "packed": resolved_packed_count,
             "unpacked": resolved_unpacked_count,
             "fill_ratio_bbox": 0.0,
+        },
+        "units": {
+            "scale": units.get("scale"),
+            "manual_scale": units.get("manual_scale"),
+            "auto_scale_applied": units.get("auto_scale_applied", False),
+            "auto_scale_factor": units.get("auto_scale_factor"),
+        },
+    }
+
+
+def build_truck_packing_result(
+    *,
+    input_paths: Sequence[Path],
+    catalog_items: Sequence[CatalogItem],
+    constraints: dict[str, Any],
+    outcome: TruckPackOutcome | None,
+    units: dict[str, Any] | None = None,
+    export_mode: str | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    units = units or {
+        "scale": None,
+        "manual_scale": None,
+        "auto_scale_applied": False,
+        "auto_scale_factor": None,
+    }
+    used_extents = outcome.used_extents if outcome is not None else None
+    fit_verdict = validate_constraints(used_extents, constraints)
+    placed_items = [_placement_payload(placement) for placement in (outcome.placements if outcome else [])]
+    unplaced_items = _unplaced_payload(outcome.unplaced_parts if outcome else [], catalog_items)
+    packed_count = len(placed_items)
+    unpacked_count = sum(item["quantity"] for item in unplaced_items)
+    total_items = packed_count + unpacked_count
+    success = error is None and unpacked_count == 0 and fit_verdict["fits"]
+    error_text = error
+    if error_text is None and not success:
+        if fit_verdict["violations"]:
+            error_text = format_constraint_failure_message(fit_verdict)
+        elif unplaced_items:
+            error_text = _format_unplaced_summary(unplaced_items)
+        else:
+            error_text = "Расчёт укладки не вернул корректный результат."
+
+    return {
+        "status": "ok" if success else "failed",
+        "success": success,
+        "error": None if success else error_text,
+        "input": _build_input_payload(input_paths),
+        "truck": _truck_payload(constraints),
+        "constraints": constraints,
+        "catalog": [item.to_dict() for item in catalog_items],
+        "packing_mode": "truck_loading_v2",
+        "fits": success,
+        "does_not_fit": not success,
+        "violations": fit_verdict["violations"],
+        "limit_exceeded": fit_verdict["limit_exceeded"],
+        "placed_items": placed_items,
+        "unplaced_items": unplaced_items,
+        "recommended_dims_mm": {
+            "L": fit_verdict["used_extents_mm"]["L"],
+            "W": fit_verdict["used_extents_mm"]["W"],
+            "H": fit_verdict["used_extents_mm"]["H"],
+        },
+        "used_extents_mm": fit_verdict["used_extents_mm"],
+        "packed_count": packed_count,
+        "unpacked_count": unpacked_count,
+        "fill_ratio": round(outcome.fill_ratio_truck, 6) if outcome is not None else 0.0,
+        "export_mode": export_mode,
+        "stats": {
+            "n_parts": total_items,
+            "packed": packed_count,
+            "unpacked": unpacked_count,
+            "fill_ratio_bbox": round(outcome.fill_ratio_bbox, 6) if outcome is not None else 0.0,
+            "fill_ratio_truck": round(outcome.fill_ratio_truck, 6) if outcome is not None else 0.0,
         },
         "units": {
             "scale": units.get("scale"),
@@ -152,34 +216,25 @@ def write_result_json(data: dict[str, Any], path: Path) -> None:
 
 
 def validate_constraints(
-    result: PackOutcome | tuple[float, float, float] | None,
+    result: PackOutcome | TruckPackOutcome | tuple[float, float, float] | None,
     constraints: dict[str, Any],
 ) -> dict[str, Any]:
     used_extents = _coerce_used_extents(result)
-    actual_extents = _actual_used_extents_payload(
-        constraints=constraints,
-        used_extents=used_extents,
-    )
-    violations = _collect_constraint_violations(
-        constraints=constraints,
-        actual_extents=actual_extents,
-    )
+    actual_extents = _actual_used_extents_payload(used_extents=used_extents)
+    violations = _collect_constraint_violations(constraints=constraints, actual_extents=actual_extents)
     return {
         "fits": used_extents is not None and not violations,
         "does_not_fit": bool(violations),
         "violations": violations,
         "limit_exceeded": violations[0] if violations else None,
-        "used_extents_mm": _used_extents_payload(
-            used_extents=used_extents,
-            actual_extents=actual_extents,
-        ),
+        "used_extents_mm": _used_extents_payload(used_extents=used_extents, actual_extents=actual_extents),
     }
 
 
 def format_constraint_failure_message(fit_verdict: dict[str, Any]) -> str:
     violations = list(fit_verdict.get("violations") or [])
     if not violations:
-        return "Packing found, but active hard constraints are not satisfied."
+        return "Превышены ограничения кузова."
     if len(violations) == 1:
         return _format_constraint_violation_message(violations[0])
     return "; ".join(_format_constraint_violation_message(violation) for violation in violations)
@@ -187,19 +242,16 @@ def format_constraint_failure_message(fit_verdict: dict[str, Any]) -> str:
 
 def _format_constraint_violation_message(violation: dict[str, Any]) -> str:
     axis_names = {
-        "L": "длина",
-        "W": "ширина",
-        "H": "высота",
+        "L": "длине",
+        "W": "ширине",
+        "H": "высоте",
     }
     axis = str(violation.get("axis") or "")
     axis_name = axis_names.get(axis, axis)
     actual = int(violation.get("actual") or 0)
     maximum = int(violation.get("max") or 0)
     excess = int(violation.get("excess") or (actual - maximum))
-    return (
-        f"Не помещается: {axis_name} {actual} мм "
-        f"превышает допустимые {maximum} мм на {excess} мм"
-    )
+    return f"Превышение по {axis_name} кузова: {actual} мм при пределе {maximum} мм, запас превышен на {excess} мм."
 
 
 def _fmt(value: float) -> str:
@@ -310,75 +362,75 @@ def _build_input_payload(input_paths: Sequence[Path]) -> dict[str, Any]:
     return payload
 
 
-def _treat_input_as_single_item(constraints: dict[str, Any]) -> bool:
-    return bool(constraints.get("treat_input_as_single_item"))
-
-
-def _flat_only(constraints: dict[str, Any]) -> bool:
-    return bool(constraints.get("flat_only"))
-
-
-def _packing_mode(constraints: dict[str, Any]) -> str:
-    mode = str(constraints.get("packing_mode") or "")
-    if mode == "solids":
-        return "solids"
-    if mode == "flat_assembly_footprint":
-        return "flat_assembly_footprint"
-    if mode == "multi_root_shapes":
-        return "multi_root_shapes"
-    if mode in {"single_root_shape", "rigid_group"}:
-        return "single_root_shape"
-    if _treat_input_as_single_item(constraints) and _flat_only(constraints):
-        return "flat_assembly_footprint"
-    return "single_root_shape" if _treat_input_as_single_item(constraints) else "solids"
-
-
-def _max_package_dims(constraints: dict[str, Any]) -> dict[str, Any]:
+def _truck_payload(constraints: dict[str, Any]) -> dict[str, Any]:
     return {
-        "L": constraints.get("maxL"),
-        "W": constraints.get("maxW"),
-        "H": constraints.get("maxH"),
+        "length_mm": constraints.get("maxL"),
+        "width_mm": constraints.get("maxW"),
+        "height_mm": constraints.get("maxH"),
+        "gap_mm": constraints.get("gap"),
     }
 
 
-def _copies(constraints: dict[str, Any]) -> int:
-    value = constraints.get("copies")
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(round(value))
-    return 1
+def _placement_payload(placement: Placement) -> dict[str, Any]:
+    return {
+        "instance_id": placement.part_id,
+        "item_id": placement.part.source_part_id or placement.part_id,
+        "name": placement.part.display_name or placement.part_id,
+        "source_path": placement.part.source_path,
+        "copy_index": placement.copy_index,
+        "rotation": placement.rot,
+        "position_mm": {
+            "x": round(placement.x, 3),
+            "y": round(placement.y, 3),
+            "z": round(placement.z, 3),
+        },
+        "dimensions_mm": {
+            "L": round(placement.dx, 3),
+            "W": round(placement.dy, 3),
+            "H": round(placement.dz, 3),
+        },
+    }
 
 
-def _planar_rotation_step_deg(constraints: dict[str, Any]) -> float:
-    value = constraints.get("planar_rotation_step_deg")
-    if isinstance(value, bool):
-        return float(int(value))
-    if isinstance(value, (int, float)):
-        return float(value)
-    return 0.0
+def _unplaced_payload(unplaced_parts: Iterable[Part], catalog_items: Sequence[CatalogItem]) -> list[dict[str, Any]]:
+    by_item_id = {item.item_id: item for item in catalog_items}
+    counts = Counter(part.source_part_id or part.part_id for part in unplaced_parts)
+    payload: list[dict[str, Any]] = []
+    for item_id, quantity in sorted(counts.items()):
+        item = by_item_id.get(item_id)
+        payload.append(
+            {
+                "item_id": item_id,
+                "name": (item.display_name if item is not None else item_id),
+                "source_path": (item.source_path if item is not None else None),
+                "quantity": int(quantity),
+            }
+        )
+    return payload
 
 
-def _orientation_policy(constraints: dict[str, Any]) -> str:
-    value = constraints.get("orientation_policy")
-    return str(value) if value else "default"
+def _format_unplaced_summary(unplaced_items: Sequence[dict[str, Any]]) -> str:
+    if not unplaced_items:
+        return "Не все грузовые места помещаются в кузов."
+    summary = ", ".join(f"{item['name']} x{item['quantity']}" for item in unplaced_items)
+    return f"Не все грузовые места помещаются в кузов. Неразмещённые: {summary}."
 
 
-def _longest_to_length(constraints: dict[str, Any]) -> bool:
-    return bool(constraints.get("longest_to_length"))
-
-
-def _shortest_to_height(constraints: dict[str, Any]) -> bool:
-    return bool(constraints.get("shortest_to_height"))
+def _coerce_used_extents(
+    result: PackOutcome | TruckPackOutcome | tuple[float, float, float] | None,
+) -> tuple[float, float, float] | None:
+    if result is None:
+        return None
+    if isinstance(result, (PackOutcome, TruckPackOutcome)):
+        return result.used_extents
+    return result
 
 
 def _used_extents_payload(
+    *,
     used_extents: tuple[float, float, float] | None,
-    actual_extents: dict[str, int | None] | None = None,
+    actual_extents: dict[str, int | None],
 ) -> dict[str, Any]:
-    actual_extents = actual_extents or {"L": None, "W": None, "H": None}
     if used_extents is None:
         return {
             "L": actual_extents["L"],
@@ -397,19 +449,9 @@ def _used_extents_payload(
         "maxZ": ceil_mm(used_extents[2]),
     }
 
-def _coerce_used_extents(
-    result: PackOutcome | tuple[float, float, float] | None,
-) -> tuple[float, float, float] | None:
-    if result is None:
-        return None
-    if isinstance(result, PackOutcome):
-        return result.used_extents
-    return result
-
 
 def _actual_used_extents_payload(
     *,
-    constraints: dict[str, Any],
     used_extents: tuple[float, float, float] | None,
 ) -> dict[str, int | None]:
     if used_extents is None:
@@ -418,13 +460,10 @@ def _actual_used_extents_payload(
             "W": None,
             "H": None,
         }
-
-    gap_value = constraints.get("gap")
-    gap = float(gap_value) if isinstance(gap_value, (int, float)) else 0.0
     return {
-        "L": ceil_mm(used_extents[0] + gap),
-        "W": ceil_mm(used_extents[1] + gap),
-        "H": ceil_mm(used_extents[2] + gap),
+        "L": ceil_mm(used_extents[0]),
+        "W": ceil_mm(used_extents[1]),
+        "H": ceil_mm(used_extents[2]),
     }
 
 

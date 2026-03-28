@@ -1,22 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import random
 from typing import Any
 
-from packing_mvp.utils import (
-    EPS,
-    Part,
-    Placement,
-    canonical_flat_orientation,
-    ceil_mm,
-    compute_used_extents,
-    dims_from_bbox,
-    filter_orientations_flat_only,
-    rigid_group_flat_assembly_footprint_dims,
-    rigid_group_rotated_bbox,
-    sample_planar_angles,
-)
+from packing_mvp.utils import EPS, Part, Placement, ceil_mm, compute_used_extents, z_rotation_orientations
 
 
 class PackingError(RuntimeError):
@@ -24,7 +11,7 @@ class PackingError(RuntimeError):
 
 
 class DoesNotFitError(PackingError):
-    """Raised when the requested container constraints cannot contain the parts."""
+    """Raised when the requested truck cannot contain all items."""
 
 
 @dataclass(frozen=True)
@@ -38,10 +25,135 @@ class PackOutcome:
 
 
 @dataclass(frozen=True)
+class TruckPackOutcome:
+    placements: list[Placement]
+    unplaced_parts: list[Part]
+    used_extents: tuple[float, float, float]
+    container_dims: tuple[int, int, int]
+    fill_ratio_bbox: float
+    fill_ratio_truck: float
+
+    @property
+    def success(self) -> bool:
+        return not self.unplaced_parts
+
+
+@dataclass(frozen=True)
 class OrientationCandidate:
     rot: str
     dims: tuple[float, float, float]
     planar_angle_deg: float = 0.0
+
+
+def pack_items_in_truck(
+    parts: list[Part],
+    *,
+    truck_l: float,
+    truck_w: float,
+    truck_h: float,
+    gap: float,
+    logger: Any | None = None,
+) -> TruckPackOutcome:
+    if not parts:
+        raise PackingError("No items available for packing.")
+    if truck_l <= 0 or truck_w <= 0 or truck_h <= 0:
+        raise PackingError("Truck dimensions must be positive.")
+    if gap < 0:
+        raise PackingError("Gap must be non-negative.")
+
+    _validate_items(parts, truck_w=truck_w, truck_h=truck_h)
+
+    placements: list[Placement] = []
+    unplaced_parts: list[Part] = []
+    candidate_points: list[tuple[float, float, float]] = [(0.0, 0.0, 0.0)]
+    current_extents = (0.0, 0.0, 0.0)
+
+    for part in _ordered_parts(parts):
+        best_choice: tuple[
+            tuple[float, float, float, float, float, float, float],
+            tuple[float, float, float],
+            OrientationCandidate,
+        ] | None = None
+
+        for point in candidate_points:
+            for candidate in _resolve_allowed_orientations(part):
+                if not _fits_in_container(
+                    point=point,
+                    dims=candidate.dims,
+                    container_l=truck_l,
+                    container_w=truck_w,
+                    container_h=truck_h,
+                ):
+                    continue
+                if _overlaps_with_gap(point=point, dims=candidate.dims, placements=placements, gap=gap):
+                    continue
+
+                score = _placement_score(point=point, dims=candidate.dims, current_extents=current_extents)
+                if best_choice is None or score < best_choice[0]:
+                    best_choice = (score, point, candidate)
+
+        if best_choice is None:
+            unplaced_parts.append(part)
+            if logger:
+                logger.info("No free slot found for %s (%s).", part.part_id, part.display_name)
+            continue
+
+        _, point, candidate = best_choice
+        placement = Placement(
+            part=part,
+            x=point[0],
+            y=point[1],
+            z=point[2],
+            dims=candidate.dims,
+            rot=candidate.rot,
+            planar_angle_deg=0.0,
+        )
+        placements.append(placement)
+        current_extents = (
+            max(current_extents[0], placement.x + placement.dx),
+            max(current_extents[1], placement.y + placement.dy),
+            max(current_extents[2], placement.z + placement.dz),
+        )
+        candidate_points.extend(
+            [
+                (placement.x + placement.dx + gap, placement.y, placement.z),
+                (placement.x, placement.y + placement.dy + gap, placement.z),
+                (placement.x, placement.y, placement.z + placement.dz),
+            ]
+        )
+        candidate_points = _prune_candidate_points(
+            candidate_points,
+            placements=placements,
+            container_l=truck_l,
+            container_w=truck_w,
+            container_h=truck_h,
+            gap=gap,
+        )
+        if logger:
+            logger.debug(
+                "Placed %s at (%.1f, %.1f, %.1f) dims=(%.1f, %.1f, %.1f) rot=%s",
+                placement.part_id,
+                placement.x,
+                placement.y,
+                placement.z,
+                placement.dx,
+                placement.dy,
+                placement.dz,
+                placement.rot,
+            )
+
+    used_extents = compute_used_extents(placements)
+    used_volume = sum(placement.dx * placement.dy * placement.dz for placement in placements)
+    bbox_volume = max(used_extents[0] * used_extents[1] * used_extents[2], EPS)
+    truck_volume = max(truck_l * truck_w * truck_h, EPS)
+    return TruckPackOutcome(
+        placements=placements,
+        unplaced_parts=unplaced_parts,
+        used_extents=used_extents,
+        container_dims=(ceil_mm(truck_l), ceil_mm(truck_w), ceil_mm(truck_h)),
+        fill_ratio_bbox=used_volume / bbox_volume,
+        fill_ratio_truck=used_volume / truck_volume,
+    )
 
 
 def pack_parts(
@@ -55,405 +167,126 @@ def pack_parts(
     planar_rotation_step_deg: float = 0.0,
     logger: Any | None = None,
 ) -> PackOutcome:
-    if not parts:
-        raise PackingError("No parts available for packing.")
-    if max_w <= 0 or max_h <= 0:
-        raise PackingError("Container width and height must be positive.")
-    if gap < 0:
-        raise PackingError("Gap must be non-negative.")
+    del seed, flat_only, planar_rotation_step_deg
 
-    _validate_cross_section(
-        parts,
-        max_w=max_w,
-        max_h=max_h,
-        gap=gap,
-        flat_only=flat_only,
-        planar_rotation_step_deg=planar_rotation_step_deg,
-    )
+    if max_l is None:
+        lower = ceil_mm(max(max(candidate.dims[0] for candidate in _resolve_allowed_orientations(part)) for part in parts))
+        upper = ceil_mm(sum(max(candidate.dims[0] for candidate in _resolve_allowed_orientations(part)) for part in parts) + max(0.0, gap) * max(0, len(parts) - 1))
+        if lower > upper:
+            upper = lower
 
-    if max_l is not None:
-        search_length = ceil_mm(max_l)
-        placements = _attempt_pack(
-            parts=parts,
-            container_l=search_length,
-            container_w=max_w,
-            container_h=max_h,
-            gap=gap,
-            seed=seed,
-            flat_only=flat_only,
-            planar_rotation_step_deg=planar_rotation_step_deg,
-            logger=logger,
-        )
-        if placements is None:
-            raise DoesNotFitError(
-                "Packing failed: rigid items do not fit into "
-                f"L={search_length}, W={ceil_mm(max_w)}, H={ceil_mm(max_h)}."
-            )
-        if logger:
-            logger.info("Packing succeeded with fixed length L=%s", search_length)
-    else:
-        lower, upper = _search_bounds(
-            parts,
-            gap,
-            flat_only=flat_only,
-            planar_rotation_step_deg=planar_rotation_step_deg,
-        )
-        if logger:
-            logger.info("Searching minimal working length in range [%s, %s]", lower, upper)
-
-        cache: dict[int, list[Placement] | None] = {}
-
-        def attempt(length: int) -> list[Placement] | None:
-            if length not in cache:
-                cache[length] = _attempt_pack(
-                    parts=parts,
-                    container_l=length,
-                    container_w=max_w,
-                    container_h=max_h,
-                    gap=gap,
-                    seed=seed,
-                    flat_only=flat_only,
-                    planar_rotation_step_deg=planar_rotation_step_deg,
-                    logger=logger,
-                )
-            return cache[length]
-
-        high_result = attempt(upper)
-        if high_result is None:
-            raise DoesNotFitError(
-                "Packing failed even with a generous search length. "
-                "Check width/height limits, gap, or extracted part dimensions."
-            )
-
+        best: TruckPackOutcome | None = None
         best_length = upper
-        best_placements = high_result
         low = lower
         high = upper
-
-        while low < high:
+        while low <= high:
             mid = (low + high) // 2
-            if logger:
-                logger.debug("Trying candidate length L=%s", mid)
-            current = attempt(mid)
-            if current is None:
-                low = mid + 1
-            else:
-                high = mid
+            current = pack_items_in_truck(
+                parts,
+                truck_l=float(mid),
+                truck_w=max_w,
+                truck_h=max_h,
+                gap=gap,
+                logger=logger,
+            )
+            if current.success:
+                best = current
                 best_length = mid
-                best_placements = current
+                high = mid - 1
+            else:
+                low = mid + 1
 
-        if best_placements is None or best_length != low:
-            final = attempt(low)
-            if final is None:
-                raise PackingError("Binary search ended without a feasible packing.")
-            best_placements = final
-            best_length = low
-
+        if best is None:
+            raise DoesNotFitError(_format_unplaced_message(parts))
+        outcome = best
         search_length = best_length
-        placements = best_placements
-        if logger:
-            logger.info("Minimal working length found: L=%s", search_length)
+    else:
+        search_length = ceil_mm(max_l)
+        outcome = pack_items_in_truck(
+            parts,
+            truck_l=max_l,
+            truck_w=max_w,
+            truck_h=max_h,
+            gap=gap,
+            logger=logger,
+        )
+        if outcome.unplaced_parts:
+            raise DoesNotFitError(_format_unplaced_message(outcome.unplaced_parts))
 
-    used_extents = compute_used_extents(placements)
+    used_extents = outcome.used_extents
     recommended_dims = (
-        ceil_mm(used_extents[0] + gap),
-        ceil_mm(used_extents[1] + gap),
-        ceil_mm(used_extents[2] + gap),
+        ceil_mm(used_extents[0]),
+        ceil_mm(used_extents[1]),
+        ceil_mm(used_extents[2]),
     )
-    container_dims = (
-        search_length,
-        ceil_mm(max_w),
-        ceil_mm(max_h),
-    )
-    used_volume = sum(placement.dx * placement.dy * placement.dz for placement in placements)
-    bbox_volume = max(
-        (recommended_dims[0] * recommended_dims[1] * recommended_dims[2]),
-        EPS,
-    )
-    fill_ratio = used_volume / bbox_volume
-
     return PackOutcome(
-        placements=placements,
+        placements=outcome.placements,
         used_extents=used_extents,
         recommended_dims=recommended_dims,
-        container_dims=container_dims,
+        container_dims=(search_length, ceil_mm(max_w), ceil_mm(max_h)),
         search_length=search_length,
-        fill_ratio_bbox=fill_ratio,
+        fill_ratio_bbox=outcome.fill_ratio_bbox,
     )
 
 
-def _validate_cross_section(
-    parts: list[Part],
-    max_w: float,
-    max_h: float,
-    gap: float,
-    flat_only: bool,
-    planar_rotation_step_deg: float,
-) -> None:
-    free_w = max_w - 2.0 * gap
-    free_h = max_h - 2.0 * gap
-    if free_w <= 0 or free_h <= 0:
-        raise PackingError("Gap leaves no usable width/height inside the container.")
-
+def _validate_items(parts: list[Part], *, truck_w: float, truck_h: float) -> None:
     for part in parts:
-        orientations = _resolve_allowed_orientations(
-            part,
-            flat_only=flat_only,
-            planar_rotation_step_deg=planar_rotation_step_deg,
-        )
-        if not any(
-            candidate.dims[1] <= free_w + EPS and candidate.dims[2] <= free_h + EPS
-            for candidate in orientations
-        ):
-            dims_str = ", ".join(f"{value:.3f}" for value in part.dims)
-            if flat_only:
-                raise DoesNotFitError(
-                    f"Part {part.part_id} with dims ({dims_str}) does not fit container width/height in allowed flat orientations."
-                )
+        orientations = _resolve_allowed_orientations(part)
+        if not any(candidate.dims[1] <= truck_w + EPS and candidate.dims[2] <= truck_h + EPS for candidate in orientations):
             raise DoesNotFitError(
-                f"Part {part.part_id} with dims ({dims_str}) does not fit container width/height in any rotation."
+                f"Item {part.part_id} with dimensions {tuple(round(value, 3) for value in part.dims)} "
+                "does not fit truck width/height in the allowed standing orientations."
             )
-
-
-def _search_bounds(
-    parts: list[Part],
-    gap: float,
-    *,
-    flat_only: bool,
-    planar_rotation_step_deg: float,
-) -> tuple[int, int]:
-    min_lengths: list[float] = []
-    max_lengths: list[float] = []
-    for part in parts:
-        orientations = _resolve_allowed_orientations(
-            part,
-            flat_only=flat_only,
-            planar_rotation_step_deg=planar_rotation_step_deg,
-        )
-        min_lengths.append(min(candidate.dims[0] for candidate in orientations))
-        max_lengths.append(max(candidate.dims[0] for candidate in orientations))
-
-    lower = ceil_mm(max(min_lengths) + 2.0 * gap)
-    upper = ceil_mm(sum(max_lengths) + gap * (len(parts) + 1))
-    return lower, max(lower, upper)
-
-
-def _attempt_pack(
-    parts: list[Part],
-    container_l: float,
-    container_w: float,
-    container_h: float,
-    gap: float,
-    seed: int,
-    flat_only: bool,
-    planar_rotation_step_deg: float,
-    logger: Any | None = None,
-) -> list[Placement] | None:
-    ordered_parts = _ordered_parts(parts, seed)
-    placements: list[Placement] = []
-    candidate_points: list[tuple[float, float, float]] = [(gap, gap, gap)]
-    current_extents = (0.0, 0.0, 0.0)
-
-    for part in ordered_parts:
-        orientations = _resolve_allowed_orientations(
-            part,
-            flat_only=flat_only,
-            planar_rotation_step_deg=planar_rotation_step_deg,
-        )
-        best_choice: tuple[
-            tuple[float, float, float, float, float, float, float],
-            tuple[float, float, float],
-            tuple[float, float, float],
-            str,
-            float,
-        ] | None = None
-
-        for point in candidate_points:
-            for candidate in orientations:
-                rot_label = candidate.rot
-                rotated_dims = candidate.dims
-                if not _fits_in_container(
-                    point=point,
-                    dims=rotated_dims,
-                    container_l=container_l,
-                    container_w=container_w,
-                    container_h=container_h,
-                    gap=gap,
-                ):
-                    continue
-                if _overlaps_with_gap(point=point, dims=rotated_dims, placements=placements, gap=gap):
-                    continue
-
-                score = _placement_score(
-                    point=point,
-                    dims=rotated_dims,
-                    current_extents=current_extents,
-                )
-                if best_choice is None or score < best_choice[0]:
-                    best_choice = (
-                        score,
-                        point,
-                        rotated_dims,
-                        rot_label,
-                        candidate.planar_angle_deg,
-                    )
-
-        if best_choice is None:
-            if logger:
-                logger.debug("Could not place %s inside L=%s", part.part_id, container_l)
-            return None
-
-        _, point, rotated_dims, rot_label, planar_angle_deg = best_choice
-        placement = Placement(
-            part=part,
-            x=point[0],
-            y=point[1],
-            z=point[2],
-            dims=rotated_dims,
-            rot=rot_label,
-            planar_angle_deg=planar_angle_deg,
-        )
-        placements.append(placement)
-        current_extents = (
-            max(current_extents[0], placement.x + placement.dx),
-            max(current_extents[1], placement.y + placement.dy),
-            max(current_extents[2], placement.z + placement.dz),
-        )
-        if logger:
-            logger.debug(
-                "Placed %s at (%.3f, %.3f, %.3f) dims=(%.3f, %.3f, %.3f) rot=%s angle=%.3f",
-                placement.part_id,
-                placement.x,
-                placement.y,
-                placement.z,
-                placement.dx,
-                placement.dy,
-                placement.dz,
-                placement.rot,
-                placement.planar_angle_deg,
-            )
-
-        candidate_points.extend(
-            [
-                (placement.x + placement.dx + gap, placement.y, placement.z),
-                (placement.x, placement.y + placement.dy + gap, placement.z),
-                (placement.x, placement.y, placement.z + placement.dz + gap),
-            ]
-        )
-        candidate_points = _prune_candidate_points(
-            candidate_points,
-            placements=placements,
-            container_l=container_l,
-            container_w=container_w,
-            container_h=container_h,
-            gap=gap,
-        )
-
-    return placements
 
 
 def _resolve_allowed_orientations(
     part: Part,
     *,
-    flat_only: bool,
-    planar_rotation_step_deg: float,
+    flat_only: bool = False,
+    planar_rotation_step_deg: float = 0.0,
 ) -> list[OrientationCandidate]:
-    if part.mode == "rigid_group" and part.orientation_policy == "flat_assembly_footprint":
-        base_rot, footprint_dims = rigid_group_flat_assembly_footprint_dims(
-            part.source_solids,
-            part.dims,
-        )
-        return [
-            OrientationCandidate(
-                rot=base_rot,
-                dims=footprint_dims,
-                planar_angle_deg=0.0,
-            )
-        ]
-
-    if (
-        part.mode == "rigid_group"
-        and flat_only
-        and part.orientation_policy == "assembly_axes_parallel_to_box_axes"
-    ):
-        base_rot, footprint_dims = rigid_group_flat_assembly_footprint_dims(
-            part.source_solids,
-            part.dims,
-        )
-        return [
-            OrientationCandidate(
-                rot=base_rot,
-                dims=footprint_dims,
-                planar_angle_deg=0.0,
-            )
-        ]
-
-    if part.mode == "rigid_group" and flat_only:
-        base_rot, _ = canonical_flat_orientation(part.dims)
-        return [
-            OrientationCandidate(
-                rot=base_rot,
-                dims=dims_from_bbox(
-                    rigid_group_rotated_bbox(
-                        part.source_solids,
-                        base_rot,
-                        planar_angle_deg,
-                    )
-                ),
-                planar_angle_deg=planar_angle_deg,
-            )
-            for planar_angle_deg in sample_planar_angles(planar_rotation_step_deg)
-        ]
-
-    orientations = filter_orientations_flat_only(part.dims, flat_only=flat_only)
-    if not orientations and flat_only:
-        raise PackingError(f"No flat orientations available for part {part.part_id} with flat_only enabled")
+    del flat_only, planar_rotation_step_deg
     return [
-        OrientationCandidate(
-            rot=label,
-            dims=rotated_dims,
-            planar_angle_deg=0.0,
-        )
-        for label, rotated_dims in orientations
+        OrientationCandidate(rot=label, dims=rotated_dims, planar_angle_deg=0.0)
+        for label, rotated_dims in z_rotation_orientations(part.dims)
     ]
 
 
-def _ordered_parts(parts: list[Part], seed: int) -> list[Part]:
-    rng = random.Random(seed)
-    decorated = [(part, rng.random()) for part in parts]
-    decorated.sort(
-        key=lambda item: (
-            -item[0].volume,
-            -max(item[0].dims),
-            -sum(item[0].dims),
-            item[1],
-            item[0].part_id,
-        )
+def _ordered_parts(parts: list[Part]) -> list[Part]:
+    return sorted(
+        parts,
+        key=lambda part: (
+            -(part.dims[0] * part.dims[1]),
+            -part.volume,
+            -part.dims[2],
+            part.source_part_id or part.part_id,
+            part.part_id,
+        ),
     )
-    return [item[0] for item in decorated]
 
 
 def _fits_in_container(
+    *,
     point: tuple[float, float, float],
     dims: tuple[float, float, float],
     container_l: float,
     container_w: float,
     container_h: float,
-    gap: float,
 ) -> bool:
     x, y, z = point
     dx, dy, dz = dims
     return (
-        x >= gap - EPS
-        and y >= gap - EPS
-        and z >= gap - EPS
-        and x + dx <= container_l - gap + EPS
-        and y + dy <= container_w - gap + EPS
-        and z + dz <= container_h - gap + EPS
+        x >= -EPS
+        and y >= -EPS
+        and z >= -EPS
+        and x + dx <= container_l + EPS
+        and y + dy <= container_w + EPS
+        and z + dz <= container_h + EPS
     )
 
 
 def _overlaps_with_gap(
+    *,
     point: tuple[float, float, float],
     dims: tuple[float, float, float],
     placements: list[Placement],
@@ -462,20 +295,16 @@ def _overlaps_with_gap(
     x, y, z = point
     dx, dy, dz = dims
     for other in placements:
-        separated = (
-            x + dx + gap <= other.x + EPS
-            or other.x + other.dx + gap <= x + EPS
-            or y + dy + gap <= other.y + EPS
-            or other.y + other.dy + gap <= y + EPS
-            or z + dz + gap <= other.z + EPS
-            or other.z + other.dz + gap <= z + EPS
-        )
-        if not separated:
+        separated_x = x + dx + gap <= other.x + EPS or other.x + other.dx + gap <= x + EPS
+        separated_y = y + dy + gap <= other.y + EPS or other.y + other.dy + gap <= y + EPS
+        separated_z = z + dz <= other.z + EPS or other.z + other.dz <= z + EPS
+        if not (separated_x or separated_y or separated_z):
             return True
     return False
 
 
 def _placement_score(
+    *,
     point: tuple[float, float, float],
     dims: tuple[float, float, float],
     current_extents: tuple[float, float, float],
@@ -486,18 +315,19 @@ def _placement_score(
     max_y = max(current_extents[1], y + dy)
     max_z = max(current_extents[2], z + dz)
     return (
+        round(z, 6),
+        round(x, 6),
+        round(y, 6),
         round(max_x, 6),
         round(max_z, 6),
         round(max_y, 6),
-        round(z, 6),
-        round(y, 6),
-        round(x, 6),
-        round(dx * dy * dz, 6),
+        round(-(dx * dy), 6),
     )
 
 
 def _prune_candidate_points(
     points: list[tuple[float, float, float]],
+    *,
     placements: list[Placement],
     container_l: float,
     container_w: float,
@@ -507,18 +337,17 @@ def _prune_candidate_points(
     filtered: list[tuple[float, float, float]] = []
     seen: set[tuple[int, int, int]] = set()
 
-    for point in sorted(points, key=lambda item: (item[0], item[2], item[1])):
+    for point in sorted(points, key=lambda item: (item[2], item[0], item[1])):
         if (
-            point[0] > container_l - gap + EPS
-            or point[1] > container_w - gap + EPS
-            or point[2] > container_h - gap + EPS
+            point[0] > container_l + EPS
+            or point[1] > container_w + EPS
+            or point[2] > container_h + EPS
         ):
             continue
-
         key = tuple(int(round(axis * 1000.0)) for axis in point)
         if key in seen:
             continue
-        if _point_is_blocked(point, placements, gap):
+        if _point_is_blocked(point, placements=placements, gap=gap):
             continue
         seen.add(key)
         filtered.append(point)
@@ -527,11 +356,7 @@ def _prune_candidate_points(
     for point in filtered:
         dominated = False
         for kept in pruned:
-            if (
-                kept[0] <= point[0] + EPS
-                and kept[1] <= point[1] + EPS
-                and kept[2] <= point[2] + EPS
-            ):
+            if kept[0] <= point[0] + EPS and kept[1] <= point[1] + EPS and kept[2] <= point[2] + EPS:
                 dominated = True
                 break
         if not dominated:
@@ -550,6 +375,7 @@ def _prune_candidate_points(
 
 def _point_is_blocked(
     point: tuple[float, float, float],
+    *,
     placements: list[Placement],
     gap: float,
 ) -> bool:
@@ -558,7 +384,16 @@ def _point_is_blocked(
         if (
             placement.x - EPS < x < placement.x + placement.dx + gap - EPS
             and placement.y - EPS < y < placement.y + placement.dy + gap - EPS
-            and placement.z - EPS < z < placement.z + placement.dz + gap - EPS
+            and placement.z - EPS < z < placement.z + placement.dz - EPS
         ):
             return True
     return False
+
+
+def _format_unplaced_message(parts: list[Part]) -> str:
+    if not parts:
+        return "Не все грузовые места помещаются в кузов."
+    names = ", ".join(part.display_name or part.part_id for part in parts[:5])
+    if len(parts) > 5:
+        names += f", and {len(parts) - 5} more"
+    return f"Не все грузовые места помещаются в кузов. Неразмещённые: {names}."

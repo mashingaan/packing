@@ -17,88 +17,38 @@ from packing_mvp.runner import PackingRunResult
 
 
 class GuiClientCopyTests(unittest.TestCase):
-    def test_client_result_copy_explains_short_length_without_technical_terms(self) -> None:
+    def test_client_result_copy_mentions_fill_and_bbox(self) -> None:
         report = _format_client_result(
             {
                 "status": "ok",
-                "input": {
-                    "file": r"C:\tmp\demo.step",
-                },
-                "constraints": {
-                    "maxL": 1600,
-                    "seed": 42,
-                },
-                "recommended_dims_mm": {
-                    "L": 120,
-                    "W": 2400,
-                    "H": 1800,
-                },
-                "used_extents_mm": {
-                    "maxX": 110,
-                    "maxY": 2200,
-                    "maxZ": 1700,
-                },
-                "stats": {
-                    "n_parts": 12,
-                    "packed": 12,
-                    "unpacked": 0,
-                    "fill_ratio_bbox": 0.75,
-                },
-                "units": {
-                    "scale": 1.0,
-                    "manual_scale": 1.0,
-                    "auto_scale_applied": False,
-                    "auto_scale_factor": 1.0,
-                },
+                "fits": True,
+                "used_extents_mm": {"L": 500, "W": 400, "H": 300, "maxX": 480, "maxY": 380, "maxZ": 290},
+                "truck": {"length_mm": 13400, "width_mm": 2350, "height_mm": 2400},
+                "packed_count": 3,
+                "fill_ratio": 0.42,
+                "stats": {"n_parts": 3},
             }
         )
 
-        self.assertTrue(report.startswith("Все детали помещаются\nРекомендуемые размеры ящика: 120 x 2400 x 1800 мм"))
-        self.assertIn("Короткая длина возможна: 120 мм — это только длина, а не весь размер ящика", report)
-        self.assertIn("Габариты уложенных деталей: 110 x 2200 x 1700 мм", report)
-        self.assertIn("Детали могут быть повернуты на 90° и разложены по ширине/высоте", report)
-        self.assertIn("Деталей: 12", report)
-        self.assertIn("Использовано: 8% длины", report)
-        self.assertIn("Заполнение по габаритам деталей: 75.0%", report)
-        self.assertNotIn("Рекомендуемая длина", report)
-        self.assertNotIn("bbox", report.lower())
-        self.assertNotIn("seed", report.lower())
-        self.assertNotIn("scale", report.lower())
+        self.assertIn("Все грузовые места размещены внутри кузова.", report)
+        self.assertIn("Габариты уложенной сцены (мм): 480 x 380 x 290", report)
+        self.assertIn("Заполнение кузова: 42.0%", report)
 
-    def test_client_result_copy_mentions_auto_scale_without_showing_scale_key(self) -> None:
+    def test_client_result_copy_mentions_auto_scale(self) -> None:
         report = _format_client_result(
             {
                 "status": "ok",
-                "input": {},
-                "recommended_dims_mm": {
-                    "L": 500,
-                    "W": 400,
-                    "H": 300,
-                },
-                "used_extents_mm": {
-                    "maxX": 480,
-                    "maxY": 380,
-                    "maxZ": 290,
-                },
-                "stats": {
-                    "n_parts": 3,
-                    "packed": 3,
-                    "unpacked": 0,
-                    "fill_ratio_bbox": 0.42,
-                },
-                "units": {
-                    "scale": 1000.0,
-                    "manual_scale": 1.0,
-                    "auto_scale_applied": True,
-                    "auto_scale_factor": 1000.0,
-                },
+                "fits": True,
+                "used_extents_mm": {"L": 500, "W": 400, "H": 300, "maxX": 480, "maxY": 380, "maxZ": 290},
+                "truck": {"length_mm": 13400, "width_mm": 2350, "height_mm": 2400},
+                "packed_count": 3,
+                "fill_ratio": 0.42,
+                "stats": {"n_parts": 3},
+                "units": {"auto_scale_applied": True},
             }
         )
 
-        self.assertIn("Рекомендуемые размеры ящика: 500 x 400 x 300 мм", report)
-        self.assertIn("Короткая длина возможна: 500 мм — это только длина, а не весь размер ящика", report)
         self.assertIn("автоматически приведены к миллиметрам", report)
-        self.assertNotIn("scale", report.lower())
 
 
 class GuiBehaviorTests(unittest.TestCase):
@@ -110,104 +60,44 @@ class GuiBehaviorTests(unittest.TestCase):
         except tk.TclError as exc:
             self.skipTest(f"Tk is unavailable in this environment: {exc}")
 
-    def test_gui_hides_seed_control_and_collapses_advanced_section_by_default(self) -> None:
+    def test_gui_hides_advanced_section_by_default(self) -> None:
         app = self._build_app()
         try:
-            self.assertFalse(hasattr(app, "seed_var"))
             self.assertFalse(app._advanced_visible)
-            self.assertEqual(
-                app.advanced_toggle_button.cget("text"),
-                "Показать дополнительные параметры",
-            )
-
+            self.assertEqual(app.advanced_toggle_button.cget("text"), "Показать дополнительные параметры")
             app._toggle_advanced()
             self.assertTrue(app._advanced_visible)
-            self.assertEqual(
-                app.advanced_toggle_button.cget("text"),
-                "Скрыть дополнительные параметры",
-            )
+            self.assertEqual(app.advanced_toggle_button.cget("text"), "Скрыть дополнительные параметры")
         finally:
             app.destroy()
 
-    def test_gui_request_uses_default_seed_without_input_field(self) -> None:
+    def test_gui_request_uses_default_seed_and_quantities(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            input_path = tmp_path / "demo.step"
-            out_dir = tmp_path / "out"
-            input_path.write_text("dummy", encoding="utf-8")
+            tmp = Path(tmp_dir)
+            first = tmp / "first.step"
+            second = tmp / "second.step"
+            first.write_text("x", encoding="utf-8")
+            second.write_text("x", encoding="utf-8")
 
             app = self._build_app()
             try:
-                app.input_var.set(str(input_path))
-                app.output_var.set(str(out_dir))
-                app.max_w_var.set("1200")
-                app.max_h_var.set("800")
-                app.max_l_var.set("")
-                app.gap_var.set("10")
-                app.scale_var.set("1.0")
-
+                app._apply_input_paths([first, second])
+                app._input_quantity_vars[first.resolve()].set("2")
+                app._input_quantity_vars[second.resolve()].set("3")
                 request = app._build_request()
             finally:
                 app.destroy()
 
         self.assertEqual(request.seed, DEFAULT_GUI_SEED)
-        self.assertEqual(request.scale, 1.0)
+        self.assertEqual(request.input_quantities, (2, 3))
+        self.assertEqual(request.catalog_items[0].quantity, 2)
+        self.assertEqual(request.catalog_items[1].quantity, 3)
 
-    def test_gui_tracks_multiple_selected_input_files_and_count(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            first_input = tmp_path / "first.step"
-            second_input = tmp_path / "second.step"
-            first_input.write_text("first", encoding="utf-8")
-            second_input.write_text("second", encoding="utf-8")
-
-            app = self._build_app()
-            try:
-                app._apply_input_paths([first_input, second_input])
-                request = app._build_request()
-                input_count = app.input_count_var.get()
-                input_value = app.input_var.get()
-            finally:
-                app.destroy()
-
-        self.assertEqual(request.input_path, first_input)
-        self.assertEqual(request.input_paths, (first_input, second_input))
-        self.assertEqual(input_count, "2")
-        self.assertIn(str(first_input), input_value)
-        self.assertIn(str(second_input), input_value)
-
-    def test_gui_expands_file_quantities_into_request_items(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            first_input = tmp_path / "first.step"
-            second_input = tmp_path / "second.step"
-            first_input.write_text("first", encoding="utf-8")
-            second_input.write_text("second", encoding="utf-8")
-
-            app = self._build_app()
-            try:
-                app._apply_input_paths([first_input, second_input])
-                app._input_quantity_vars[first_input].set("2")
-                app._input_quantity_vars[second_input].set("3")
-                request = app._build_request()
-                input_count = app.input_count_var.get()
-                summary = app.input_summary_var.get()
-            finally:
-                app.destroy()
-
-        self.assertEqual(
-            request.input_paths,
-            (first_input, first_input, second_input, second_input, second_input),
-        )
-        self.assertEqual(input_count, "5")
-        self.assertIn("Всего деталей: 5", summary)
-
-
-    def test_gui_uses_fit_verdict_for_success_message(self) -> None:
+    def test_gui_uses_fit_verdict_for_failure_message(self) -> None:
         app = self._build_app()
         try:
             result = PackingRunResult(
-                exit_code=0,
+                exit_code=2,
                 out_dir=Path("out"),
                 result_path=Path("out/result.json"),
                 placements_path=Path("out/placements.csv"),
@@ -216,33 +106,22 @@ class GuiBehaviorTests(unittest.TestCase):
                 preview_side_path=None,
                 preview_gif_path=None,
                 result_data={
-                    "status": "ok",
-                    "fits": False,
-                    "does_not_fit": False,
-                    "violations": [
-                        {
-                            "axis": "L",
-                            "max": 10000,
-                            "actual": 10284,
-                            "excess": 284,
-                        }
-                    ],
-                    "constraints": {"maxL": 10000, "maxW": 2500, "maxH": 1800},
-                    "used_extents_mm": {"L": 10284, "W": 2400, "H": 1700, "maxX": 10274, "maxY": 2390, "maxZ": 1690},
-                    "stats": {"n_parts": 5},
+                    "status": "failed",
+                    "does_not_fit": True,
+                    "error": "Не все грузовые места помещаются в кузов.",
+                    "unplaced_items": [{"name": "crate.step", "quantity": 2}],
+                    "packed_count": 1,
+                    "unpacked_count": 2,
+                    "stats": {"n_parts": 3},
                 },
             )
-
             with patch("packing_mvp.gui.messagebox.showinfo") as showinfo:
                 with patch("packing_mvp.gui.messagebox.showerror") as showerror:
                     app._handle_result(result)
 
             showinfo.assert_not_called()
             showerror.assert_called_once()
-            self.assertGreaterEqual(len(showerror.call_args.args), 2)
-            self.assertIn("10284 / 10000", showerror.call_args.args[1])
-            self.assertNotIn("Все детали помещаются", app.status_var.get())
-            self.assertIn("10284 / 10000", app.status_var.get())
+            self.assertIn("crate.step x2", app.status_var.get())
         finally:
             app.destroy()
 

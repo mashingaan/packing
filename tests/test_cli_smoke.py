@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 from io import BytesIO, TextIOWrapper
 import json
 from pathlib import Path
@@ -14,170 +13,95 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from packing_mvp.catalog import CatalogItem
 from packing_mvp.cli import main
-from packing_mvp.utils import Part, SourceSolid
 
 
-def _solid_parts() -> list[Part]:
-    return [
-        Part(
-            part_id="part_001",
-            solid_tag=1,
-            dims=(300.0, 200.0, 100.0),
-            volume=300.0 * 200.0 * 100.0,
-            bbox_min=(0.0, 0.0, 0.0),
-            bbox_max=(300.0, 200.0, 100.0),
-        ),
-        Part(
-            part_id="part_002",
-            solid_tag=2,
-            dims=(200.0, 150.0, 150.0),
-            volume=200.0 * 150.0 * 150.0,
-            bbox_min=(0.0, 0.0, 0.0),
-            bbox_max=(200.0, 150.0, 150.0),
-        ),
-    ]
-
-
-def _rigid_group_parts() -> list[Part]:
-    return [
-        Part(
-            part_id="assembly_0",
-            solid_tag=None,
-            dims=(350.0, 200.0, 100.0),
-            volume=350.0 * 200.0 * 100.0,
-            bbox_min=(0.0, 0.0, 0.0),
-            bbox_max=(350.0, 200.0, 100.0),
-            mode="rigid_group",
-            orientation_policy="assembly_axes_parallel_to_box_axes",
-            source_solids=(
-                SourceSolid(tag=1, bbox_min=(0.0, 0.0, 0.0), bbox_max=(300.0, 200.0, 100.0)),
-                SourceSolid(tag=2, bbox_min=(320.0, 20.0, 10.0), bbox_max=(350.0, 80.0, 60.0)),
-            ),
-        )
-    ]
-
-
-def _fake_extract(
-    input_path: Path,
-    scale: float = 1.0,
-    treat_input_as_single_item: bool = False,
-    orientation_policy: str = "default",
-    logger=None,
-):
-    parts = _rigid_group_parts() if treat_input_as_single_item else _solid_parts()
-    return parts, {
-        "scale": scale,
-        "manual_scale": scale,
-        "auto_scale_applied": False,
-        "auto_scale_factor": 1.0,
-    }
+def _catalog_item(path: Path, *, quantity: int = 1) -> CatalogItem:
+    return CatalogItem(
+        item_id=f"item_{path.stem}",
+        filename=path.name,
+        source_path=str(path),
+        detected_dims_mm=(1000.0, 800.0, 600.0),
+        dimensions_mm=(1000.0, 800.0, 600.0),
+        quantity=quantity,
+    )
 
 
 def _fake_render(placements, out_dir: Path, container_dims, logger=None):
     out_dir = Path(out_dir)
-    (out_dir / "preview_top.png").write_bytes(b"fake-top")
-    (out_dir / "preview_side.png").write_bytes(b"fake-side")
+    (out_dir / "preview_top.png").write_bytes(b"top")
+    (out_dir / "preview_side.png").write_bytes(b"side")
     return out_dir / "preview_top.png", out_dir / "preview_side.png"
 
 
 def _fake_render_gif(placements, out_dir: Path, container_dims, logger=None):
     out_dir = Path(out_dir)
     gif_path = out_dir / "preview.gif"
-    gif_path.write_bytes(b"GIF89a-test-preview")
+    gif_path.write_bytes(b"GIF89a-preview")
     return gif_path
 
 
-def _fake_export_arranged_step(
-    input_step: Path,
-    placements_csv: Path,
-    output_step: Path,
-    *,
-    scale: float = 1.0,
-    units_mode: str = "packed",
-    packing_mode: str = "solids",
-    logger=None,
-):
-    output_step = Path(output_step)
-    output_step.parent.mkdir(parents=True, exist_ok=True)
-    output_step.write_text(
-        f"{Path(input_step).name}|{Path(placements_csv).name}|{scale}|{units_mode}|{packing_mode}",
-        encoding="utf-8",
-    )
+def _fake_export_scene(placements, output_step: Path, logger=None):
+    output_step.write_text("packed-step", encoding="utf-8")
+    return "source_models"
 
 
 class CliSmokeTests(unittest.TestCase):
     def test_cli_handles_non_utf_console_encoding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            input_path = tmp_path / "dummy.step"
-            out_dir = tmp_path / "out"
+            tmp = Path(tmp_dir)
+            input_path = tmp / "dummy.step"
+            out_dir = tmp / "out"
             input_path.write_text("dummy", encoding="utf-8")
             stdout_buffer = BytesIO()
             stderr_buffer = BytesIO()
             stdout_stream = TextIOWrapper(stdout_buffer, encoding="cp1252")
             stderr_stream = TextIOWrapper(stderr_buffer, encoding="cp1252")
 
+            def fake_extract(input_path: Path, *, item_id: str, quantity: int = 1, scale: float = 1.0, logger=None):
+                return _catalog_item(input_path, quantity=quantity)
+
             with patch.object(sys, "stdout", stdout_stream):
                 with patch.object(sys, "stderr", stderr_stream):
-                    with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
-                        with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
-                            with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
-                                with patch(
-                                    "packing_mvp.runner.export_arranged_step",
-                                    side_effect=_fake_export_arranged_step,
-                                ):
-                                    exit_code = main(
-                                        [
-                                            "--input",
-                                            str(input_path),
-                                            "--out",
-                                            str(out_dir),
-                                            "--maxW",
-                                            "1000",
-                                            "--maxH",
-                                            "1000",
-                                            "--gap",
-                                            "10",
-                                        ]
-                                    )
+                    with patch("packing_mvp.runner.extract_catalog_item", side_effect=fake_extract):
+                        with patch("packing_mvp.runner.export_packed_scene", side_effect=_fake_export_scene):
+                            with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
+                                with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
+                                    exit_code = main(["--input", str(input_path), "--out", str(out_dir)])
+
             stdout_stream.flush()
             stderr_stream.flush()
 
         self.assertEqual(exit_code, 0)
         self.assertIn(str(out_dir).encode("ascii"), stdout_buffer.getvalue())
-        self.assertIn(b"INFO | Starting packer", stderr_buffer.getvalue())
 
     def test_cli_creates_expected_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            input_path = tmp_path / "dummy.step"
-            out_dir = tmp_path / "out"
-            input_path.write_text("dummy", encoding="utf-8")
+            tmp = Path(tmp_dir)
+            first = tmp / "first.step"
+            second = tmp / "second.step"
+            out_dir = tmp / "out"
+            first.write_text("first", encoding="utf-8")
+            second.write_text("second", encoding="utf-8")
 
-            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
-                with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
-                    with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
-                        with patch(
-                            "packing_mvp.runner.export_arranged_step",
-                            side_effect=_fake_export_arranged_step,
-                        ) as export_mock:
+            def fake_extract(input_path: Path, *, item_id: str, quantity: int = 1, scale: float = 1.0, logger=None):
+                return _catalog_item(input_path, quantity=quantity)
+
+            with patch("packing_mvp.runner.extract_catalog_item", side_effect=fake_extract):
+                with patch("packing_mvp.runner.export_packed_scene", side_effect=_fake_export_scene):
+                    with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
+                        with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
                             exit_code = main(
                                 [
                                     "--input",
-                                    str(input_path),
+                                    str(first),
+                                    str(second),
+                                    "--quantity",
+                                    "2",
+                                    "1",
                                     "--out",
                                     str(out_dir),
-                                    "--maxW",
-                                    "1000",
-                                    "--maxH",
-                                    "1000",
-                                    "--gap",
-                                    "10",
-                                    "--seed",
-                                    "42",
-                                    "--step-units",
-                                    "source",
                                 ]
                             )
 
@@ -185,226 +109,11 @@ class CliSmokeTests(unittest.TestCase):
             self.assertTrue((out_dir / "result.json").exists())
             self.assertTrue((out_dir / "placements.csv").exists())
             self.assertTrue((out_dir / "arranged.step").exists())
-            self.assertTrue((out_dir / "preview_top.png").exists())
-            self.assertTrue((out_dir / "preview_side.png").exists())
             self.assertTrue((out_dir / "preview.gif").exists())
-            self.assertTrue((out_dir / "preview.gif").read_bytes().startswith(b"GIF"))
-            self.assertTrue((out_dir / "packing.log").exists())
-            export_mock.assert_called_once()
-            self.assertEqual(export_mock.call_args.args[1], out_dir / "placements.csv")
-            self.assertEqual(export_mock.call_args.args[2], out_dir / "arranged.step")
-            self.assertEqual(export_mock.call_args.kwargs["scale"], 1.0)
-            self.assertEqual(export_mock.call_args.kwargs["units_mode"], "source")
-            self.assertEqual(export_mock.call_args.kwargs["packing_mode"], "solids")
-
             result = json.loads((out_dir / "result.json").read_text(encoding="utf-8"))
-            self.assertEqual(result["status"], "ok")
-            self.assertEqual(result["stats"]["packed"], 2)
-            self.assertFalse(result["constraints"]["flat_only"])
-            self.assertFalse(result["treat_input_as_single_item"])
-            self.assertEqual(result["packing_mode"], "solids")
-
-    def test_cli_creates_expected_artifacts_with_flat_only(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            input_path = tmp_path / "dummy.step"
-            out_dir = tmp_path / "out"
-            input_path.write_text("dummy", encoding="utf-8")
-
-            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
-                with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
-                    with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
-                        with patch(
-                            "packing_mvp.runner.export_arranged_step",
-                            side_effect=_fake_export_arranged_step,
-                        ):
-                            exit_code = main(
-                                [
-                                    "--input",
-                                    str(input_path),
-                                    "--out",
-                                    str(out_dir),
-                                    "--maxW",
-                                    "1000",
-                                    "--maxH",
-                                    "1000",
-                                    "--gap",
-                                    "10",
-                                    "--flat-only",
-                                ]
-                            )
-
-            self.assertEqual(exit_code, 0)
-            self.assertTrue((out_dir / "result.json").exists())
-            self.assertTrue((out_dir / "placements.csv").exists())
-            self.assertTrue((out_dir / "arranged.step").exists())
-            self.assertTrue((out_dir / "preview_top.png").exists())
-            self.assertTrue((out_dir / "preview_side.png").exists())
-            self.assertTrue((out_dir / "preview.gif").exists())
-            self.assertTrue((out_dir / "preview.gif").read_bytes().startswith(b"GIF"))
-
-            result = json.loads((out_dir / "result.json").read_text(encoding="utf-8"))
-            self.assertEqual(result["status"], "ok")
-            self.assertEqual(result["stats"]["packed"], 2)
-            self.assertTrue(result["constraints"]["flat_only"])
-            self.assertTrue(result["flat_only"])
-
-            log_text = (out_dir / "packing.log").read_text(encoding="utf-8")
-            self.assertIn("Flat-only orientation filtering enabled", log_text)
-
-    def test_cli_creates_expected_artifacts_with_single_item_and_flat_only(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            input_path = tmp_path / "dummy.step"
-            out_dir = tmp_path / "out"
-            input_path.write_text("dummy", encoding="utf-8")
-
-            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
-                with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
-                    with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
-                        with patch(
-                            "packing_mvp.runner.export_arranged_step",
-                            side_effect=_fake_export_arranged_step,
-                        ) as export_mock:
-                            exit_code = main(
-                                [
-                                    "--input",
-                                    str(input_path),
-                                    "--out",
-                                    str(out_dir),
-                                    "--maxW",
-                                    "1000",
-                                    "--maxH",
-                                    "1000",
-                                    "--gap",
-                                    "10",
-                                    "--flat-only",
-                                    "--treat-input-as-single-item",
-                                ]
-                            )
-
-            self.assertEqual(exit_code, 0)
-            export_mock.assert_called_once()
-            self.assertEqual(export_mock.call_args.kwargs["packing_mode"], "flat_assembly_footprint")
-
-            result = json.loads((out_dir / "result.json").read_text(encoding="utf-8"))
-            self.assertEqual(result["status"], "ok")
-            self.assertEqual(result["stats"]["packed"], 1)
-            self.assertTrue(result["constraints"]["treat_input_as_single_item"])
-            self.assertEqual(result["constraints"]["orientation_policy"], "flat_assembly_footprint")
-            self.assertTrue(result["constraints"]["longest_to_length"])
-            self.assertTrue(result["constraints"]["shortest_to_height"])
-            self.assertTrue(result["treat_input_as_single_item"])
-            self.assertTrue(result["flat_only"])
-            self.assertEqual(result["packing_mode"], "flat_assembly_footprint")
-            self.assertEqual(result["orientation_policy"], "flat_assembly_footprint")
-            self.assertTrue(result["longest_to_length"])
-            self.assertTrue(result["shortest_to_height"])
-
-            placements_header = (out_dir / "placements.csv").read_text(encoding="utf-8").splitlines()[0]
-            self.assertEqual(
-                placements_header,
-                "item_id,mode,copy_index,source_count,source_tags,dx,dy,dz,x,y,z,rot,planar_angle_deg,bbox_minx,bbox_miny,bbox_minz,bbox_maxx,bbox_maxy,bbox_maxz",
-            )
-
-    def test_cli_accepts_copies_and_planar_rotation_step(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            input_path = tmp_path / "dummy.step"
-            out_dir = tmp_path / "out"
-            input_path.write_text("dummy", encoding="utf-8")
-
-            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
-                with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
-                    with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
-                        with patch(
-                            "packing_mvp.runner.export_arranged_step",
-                            side_effect=_fake_export_arranged_step,
-                        ) as export_mock:
-                            exit_code = main(
-                                [
-                                    "--input",
-                                    str(input_path),
-                                    "--out",
-                                    str(out_dir),
-                                    "--maxW",
-                                    "500",
-                                    "--maxH",
-                                    "150",
-                                    "--maxL",
-                                    "2000",
-                                    "--gap",
-                                    "10",
-                                    "--flat-only",
-                                    "--treat-input-as-single-item",
-                                    "--copies",
-                                    "5",
-                                    "--planar-rotation-step-deg",
-                                    "5",
-                                ]
-                            )
-
-            self.assertEqual(exit_code, 0)
-            self.assertEqual(export_mock.call_args.kwargs["packing_mode"], "flat_assembly_footprint")
-
-            result = json.loads((out_dir / "result.json").read_text(encoding="utf-8"))
-            self.assertEqual(result["status"], "ok")
-            self.assertEqual(result["copies"], 5)
-            self.assertEqual(result["planar_rotation_step_deg"], 0.0)
-            self.assertEqual(result["stats"]["packed"], 5)
-            self.assertEqual(result["packing_mode"], "flat_assembly_footprint")
-            self.assertEqual(result["orientation_policy"], "flat_assembly_footprint")
-            self.assertTrue(result["longest_to_length"])
-            self.assertTrue(result["shortest_to_height"])
-
-            with (out_dir / "placements.csv").open("r", encoding="utf-8", newline="") as handle:
-                rows = list(csv.DictReader(handle))
-            self.assertEqual(len(rows), 5)
-            self.assertEqual(sorted(row["copy_index"] for row in rows), [str(index) for index in range(5)])
-            self.assertTrue(all(row["planar_angle_deg"] for row in rows))
-            self.assertTrue(all(row["planar_angle_deg"] == "0.000" for row in rows))
-
-            log_text = (out_dir / "packing.log").read_text(encoding="utf-8")
-            self.assertIn("planar rotation disabled for resolved packing mode flat_assembly_footprint", log_text)
-
-    def test_cli_accepts_explicit_flat_assembly_packing_mode(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            input_path = tmp_path / "dummy.step"
-            out_dir = tmp_path / "out"
-            input_path.write_text("dummy", encoding="utf-8")
-
-            with patch("packing_mvp.strategies.base.extract_parts_from_step", side_effect=_fake_extract):
-                with patch("packing_mvp.runner.render_previews", side_effect=_fake_render):
-                    with patch("packing_mvp.runner.render_preview_gif", side_effect=_fake_render_gif):
-                        with patch(
-                            "packing_mvp.runner.export_arranged_step",
-                            side_effect=_fake_export_arranged_step,
-                        ) as export_mock:
-                            exit_code = main(
-                                [
-                                    "--input",
-                                    str(input_path),
-                                    "--out",
-                                    str(out_dir),
-                                    "--maxW",
-                                    "1000",
-                                    "--maxH",
-                                    "1000",
-                                    "--gap",
-                                    "10",
-                                    "--packing-mode",
-                                    "flat_assembly_footprint",
-                                ]
-                            )
-
-            self.assertEqual(exit_code, 0)
-            self.assertEqual(export_mock.call_args.kwargs["packing_mode"], "flat_assembly_footprint")
-
-            result = json.loads((out_dir / "result.json").read_text(encoding="utf-8"))
-            self.assertEqual(result["packing_mode"], "flat_assembly_footprint")
-            self.assertTrue(result["flat_only"])
-            self.assertTrue(result["treat_input_as_single_item"])
+            self.assertTrue(result["success"])
+            self.assertEqual(result["packed_count"], 3)
+            self.assertEqual([item["quantity"] for item in result["catalog"]], [2, 1])
 
 
 if __name__ == "__main__":

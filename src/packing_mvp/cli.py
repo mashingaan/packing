@@ -6,8 +6,8 @@ import sys
 from typing import TextIO
 
 from packing_mvp.presentation import format_result_summary, result_is_successful_fit
+from packing_mvp.project_io import load_project
 from packing_mvp.runner import PackingRequest, run_packing_job
-from packing_mvp.strategies import USER_PACKING_MODES
 
 
 def _positive_int(value: str) -> int:
@@ -24,56 +24,28 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
+def _nonnegative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("Value must be non-negative.")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="packer",
-        description="Pack STEP assembly solids into a container using bbox-based extreme points.",
+        description="Pack STEP-based shipping places into a truck cargo space.",
     )
-    parser.add_argument("--input", required=True, type=Path, help="Path to .stp or .step file")
+    parser.add_argument("--input", nargs="+", type=Path, help="One or more .stp/.step files")
+    parser.add_argument("--project", type=Path, help="Load a .packproj file instead of raw STEP inputs")
+    parser.add_argument("--quantity", nargs="*", type=_positive_int, default=(), help="Quantity per input STEP file")
     parser.add_argument("--out", required=True, type=Path, help="Output folder")
-    parser.add_argument("--maxW", required=True, type=float, help="Container max width in mm")
-    parser.add_argument("--maxH", required=True, type=float, help="Container max height in mm")
-    parser.add_argument("--maxL", type=float, default=None, help="Container max length in mm")
-    parser.add_argument("--gap", required=True, type=float, help="Gap between parts and walls in mm")
-    parser.add_argument("--scale", type=float, default=1.0, help="Manual scale multiplier")
-    parser.add_argument("--seed", type=int, default=42, help="Deterministic seed for tie-breaking")
-    parser.add_argument(
-        "--packing-mode",
-        choices=USER_PACKING_MODES,
-        default=None,
-        help=(
-            "Packing strategy: solids, single_root_shape, or flat_assembly_footprint. "
-            "If omitted, legacy flags are normalized to one resolved mode."
-        ),
-    )
-    parser.add_argument(
-        "--flat-only",
-        action="store_true",
-        help="Allow only flat orientations where part height equals its minimal original dimension",
-    )
-    parser.add_argument(
-        "--treat-input-as-single-item",
-        action="store_true",
-        help="Treat the whole input STEP as one rigid item and preserve relative positions of its solids",
-    )
-    parser.add_argument(
-        "--copies",
-        type=_positive_int,
-        default=1,
-        help="Pack N identical rigid copies of the same input STEP model (requires --treat-input-as-single-item)",
-    )
-    parser.add_argument(
-        "--planar-rotation-step-deg",
-        type=_positive_float,
-        default=0.0,
-        help="Experimental in-plane rotation step in degrees for flat rigid items (requires --flat-only and --treat-input-as-single-item)",
-    )
-    parser.add_argument(
-        "--step-units",
-        choices=("packed", "source"),
-        default="packed",
-        help="Units for arranged.step output: packed coordinates or original source units",
-    )
+    parser.add_argument("--maxL", type=_positive_float, default=13400.0, help="Truck length in mm")
+    parser.add_argument("--maxW", type=_positive_float, default=2350.0, help="Truck width in mm")
+    parser.add_argument("--maxH", type=_positive_float, default=2400.0, help="Truck height in mm")
+    parser.add_argument("--gap", type=_nonnegative_float, default=50.0, help="Gap between neighboring items in mm")
+    parser.add_argument("--scale", type=_positive_float, default=1.0, help="Manual scale multiplier for STEP import")
+    parser.add_argument("--seed", type=int, default=42, help="Reserved deterministic seed")
     return parser
 
 
@@ -85,7 +57,6 @@ def _print_text(stream: TextIO, text: str) -> None:
         if _try_reconfigure_utf8(stream):
             print(text, file=stream)
             return
-
     _write_with_replacement(stream, f"{text}\n")
 
 
@@ -113,28 +84,45 @@ def _write_with_replacement(stream: TextIO, text: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    result = run_packing_job(
-        PackingRequest(
-            input_path=args.input,
+    if args.project:
+        project = load_project(args.project)
+        request = PackingRequest(
+            input_path=Path(project.items[0].source_path) if project.items else Path("project.packproj"),
+            input_paths=tuple(Path(item.source_path) for item in project.items),
+            input_quantities=tuple(item.quantity for item in project.items),
+            catalog_items=tuple(project.items),
             out_dir=args.out,
+            max_l=args.maxL if args.maxL else project.truck.length_mm,
+            max_w=args.maxW if args.maxW else project.truck.width_mm,
+            max_h=args.maxH if args.maxH else project.truck.height_mm,
+            gap=args.gap if args.gap is not None else project.truck.gap_mm,
+            scale=args.scale,
+            seed=args.seed,
+        )
+    else:
+        if not args.input:
+            raise SystemExit("Either --input or --project is required.")
+        input_paths = tuple(Path(path) for path in args.input)
+        quantities = tuple(args.quantity) if args.quantity else tuple(1 for _ in input_paths)
+        if len(quantities) != len(input_paths):
+            raise SystemExit("--quantity must provide exactly one value per --input file.")
+        request = PackingRequest(
+            input_path=input_paths[0],
+            input_paths=input_paths,
+            input_quantities=quantities,
+            out_dir=args.out,
+            max_l=args.maxL,
             max_w=args.maxW,
             max_h=args.maxH,
-            max_l=args.maxL,
             gap=args.gap,
             scale=args.scale,
             seed=args.seed,
-            step_units=args.step_units,
-            packing_mode=args.packing_mode,
-            flat_only=args.flat_only,
-            treat_input_as_single_item=args.treat_input_as_single_item,
-            copies=args.copies,
-            planar_rotation_step_deg=args.planar_rotation_step_deg,
-        ),
-        with_console=True,
-    )
+        )
+
+    result = run_packing_job(request, with_console=True)
     stream = sys.stdout if result.exit_code == 0 and result_is_successful_fit(result.result_data) else sys.stderr
     _print_text(stream, format_result_summary(result.result_data))
-    _print_text(stream, f"Результаты сохранены в: {result.out_dir}")
+    _print_text(stream, f"Artifacts written to: {result.out_dir}")
     return result.exit_code
 
 

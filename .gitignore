@@ -6,7 +6,9 @@ __pycache__/
 *.pyd
 
 build/
+build-rebuild-*/
 dist/
+dist-rebuild-*/
 dist-installer/
 out-real-check/
 

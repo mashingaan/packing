@@ -10,6 +10,7 @@ from typing import Any, Literal
 from packing_mvp.strategies.base import PackingMode
 from packing_mvp.utils import (
     EPS,
+    Placement,
     RigidRotation,
     ensure_directory,
     orientation_to_rigid_rotation,
@@ -329,6 +330,49 @@ def export_arranged_step(
     except Exception:
         output_step.unlink(missing_ok=True)
         raise
+
+
+def export_packed_scene(
+    placements: list[Placement],
+    output_step: Path,
+    *,
+    logger: Any | None = None,
+) -> str:
+    output_step = Path(output_step)
+    ensure_directory(output_step.parent)
+    if not placements:
+        raise RuntimeError("No placed items are available for STEP export.")
+
+    try:
+        ocp = _load_ocp_modules()
+        transformed_shapes: list[Any] = []
+        for index, placement in enumerate(placements, start=1):
+            source_path_text = placement.part.source_path
+            if not source_path_text:
+                raise RuntimeError(f"Placement {placement.part_id} has no source STEP path.")
+            source_path = Path(source_path_text)
+            if not source_path.exists():
+                raise FileNotFoundError(f"STEP file not found for placement export: {source_path}")
+            root_shape = _read_root_shape(input_step=source_path, ocp=ocp)
+            transformed_shapes.append(
+                _transform_root_shape_for_placement(
+                    ocp=ocp,
+                    root_shape=root_shape,
+                    placement=_placement_record_from_placement(index, placement),
+                    scale=1.0,
+                    units_mode="packed",
+                    logger=logger,
+                )
+            )
+        combined_shape = _combine_shapes_into_compound(ocp=ocp, shapes=transformed_shapes)
+        _write_root_shape(ocp=ocp, shape=combined_shape, output_step=output_step)
+        _log_info(logger, "Wrote packed STEP scene using transformed source models to %s", output_step)
+        return "source_models"
+    except Exception as exc:
+        _log_warning(logger, "Falling back to box proxy STEP export: %s", exc)
+        _export_box_proxy_scene(placements=placements, output_step=output_step)
+        _log_info(logger, "Wrote packed STEP scene using box proxies to %s", output_step)
+        return "box_proxies"
 
 
 def _export_arranged_step_solids(
@@ -962,6 +1006,67 @@ def _normalize_packing_mode(packing_mode: str) -> PackingMode:
     if packing_mode == "multi_root_shapes":
         return "multi_root_shapes"
     raise RuntimeError(f"Unsupported packing mode: {packing_mode}")
+
+
+def _placement_record_from_placement(index: int, placement: Placement) -> PlacementRecord:
+    source_tags = tuple(solid.tag for solid in placement.part.source_solids) or (index,)
+    return PlacementRecord(
+        row_number=index,
+        item_id=placement.part_id,
+        mode="rigid_group",
+        solid_tag=None,
+        copy_index=placement.copy_index,
+        source_count=len(source_tags),
+        source_tags=source_tags,
+        dx=placement.dx,
+        dy=placement.dy,
+        dz=placement.dz,
+        x=placement.x,
+        y=placement.y,
+        z=placement.z,
+        rot=placement.rot,
+        planar_angle_deg=placement.planar_angle_deg,
+        bbox_minx=placement.bbox_min[0],
+        bbox_miny=placement.bbox_min[1],
+        bbox_minz=placement.bbox_min[2],
+        bbox_maxx=placement.bbox_max[0],
+        bbox_maxy=placement.bbox_max[1],
+        bbox_maxz=placement.bbox_max[2],
+    )
+
+
+def _export_box_proxy_scene(*, placements: list[Placement], output_step: Path) -> None:
+    try:
+        import gmsh  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "gmsh is required for box-proxy STEP export. Install dependencies with 'python -m pip install -e .'"
+        ) from exc
+
+    initialized = False
+    try:
+        gmsh.initialize()
+        initialized = True
+        gmsh.option.setNumber("General.Terminal", 1)
+        gmsh.clear()
+        gmsh.model.add("packed_scene")
+        for placement in placements:
+            gmsh.model.occ.addBox(
+                float(placement.x),
+                float(placement.y),
+                float(placement.z),
+                float(placement.dx),
+                float(placement.dy),
+                float(placement.dz),
+            )
+        gmsh.model.occ.synchronize()
+        gmsh.write(str(output_step))
+    finally:
+        if initialized:
+            try:
+                gmsh.finalize()
+            except Exception:
+                pass
 
 
 def _target_bbox_min(

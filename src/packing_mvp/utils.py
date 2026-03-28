@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import logging
 import math
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Any, Iterable, Literal
 
 EPS = 1e-6
 
@@ -206,6 +206,9 @@ class Part:
     source_solids: tuple[SourceSolid, ...] = ()
     source_part_id: str | None = None
     copy_index: int = 0
+    source_path: str | None = None
+    display_name: str | None = None
+    metadata: tuple[tuple[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         if self.mode not in {"solid", "rigid_group"}:
@@ -239,6 +242,8 @@ class Part:
         object.__setattr__(self, "source_solids", normalized_sources)
         if self.source_part_id is None:
             object.__setattr__(self, "source_part_id", self.part_id)
+        if self.display_name is None:
+            object.__setattr__(self, "display_name", self.part_id)
 
 
 @dataclass(frozen=True)
@@ -368,6 +373,16 @@ def filter_orientations_flat_only(
         for label, rotated_dims in orientations
         if abs(rotated_dims[2] - min_dim) < EPS
     ]
+
+
+def z_rotation_orientations(
+    dims: tuple[float, float, float],
+) -> list[tuple[str, tuple[float, float, float]]]:
+    orientations: list[tuple[str, tuple[float, float, float]]] = [("XYZ", dims)]
+    rotated = (dims[1], dims[0], dims[2])
+    if any(abs(rotated[index] - dims[index]) > EPS for index in range(3)):
+        orientations.append(("YXZ", rotated))
+    return orientations
 
 
 def canonical_flat_orientation(

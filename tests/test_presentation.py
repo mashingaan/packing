@@ -13,97 +13,41 @@ from packing_mvp.presentation import format_result_summary
 
 
 class PresentationTests(unittest.TestCase):
-    def test_success_summary_shows_full_dims_and_requested_length_percentage(self) -> None:
+    def test_success_summary_mentions_used_space_and_fill(self) -> None:
         summary = format_result_summary(
             {
                 "status": "ok",
-                "constraints": {"maxL": 4900},
-                "recommended_dims_mm": {"L": 4280, "W": 2400, "H": 1800},
+                "fits": True,
+                "truck": {"length_mm": 13400, "width_mm": 2350, "height_mm": 2400},
+                "used_extents_mm": {"L": 4280, "W": 2200, "H": 1800},
+                "packed_count": 24,
+                "fill_ratio": 0.37,
                 "stats": {"n_parts": 24},
             }
         )
 
-        self.assertEqual(
-            summary,
-            "\n".join(
-                [
-                    "Все детали помещаются",
-                    "Размеры ящика: 4280 x 2400 x 1800 мм",
-                    "4280 мм относится только к длине; детали могут быть повернуты на 90° и уложены по ширине/высоте",
-                    "Использовано: 87% длины",
-                    "Деталей: 24",
-                ]
-            ),
-        )
+        self.assertIn("Все грузовые места размещены внутри кузова.", summary)
+        self.assertIn("Использованные габариты кузова (мм): 4280 x 2200 x 1800", summary)
+        self.assertIn("Заполнение кузова: 37.0%", summary)
+        self.assertIn("Размещено мест: 24", summary)
 
-    def test_success_summary_hides_usage_when_max_length_is_not_provided(self) -> None:
-        summary = format_result_summary(
-            {
-                "status": "ok",
-                "constraints": {"maxL": None},
-                "recommended_dims_mm": {"L": 120, "W": 2400, "H": 1800},
-                "stats": {"n_parts": 12},
-            }
-        )
-
-        self.assertIn("Размеры ящика: 120 x 2400 x 1800 мм", summary)
-        self.assertNotIn("Использовано:", summary)
-
-    def test_success_summary_mentions_flat_only_when_enabled(self) -> None:
-        summary = format_result_summary(
-            {
-                "status": "ok",
-                "constraints": {"maxL": 4900, "flat_only": True},
-                "recommended_dims_mm": {"L": 4280, "W": 2400, "H": 1800},
-                "stats": {"n_parts": 24},
-            }
-        )
-
-        self.assertIn("детали укладываются только плашмя", summary)
-        self.assertIn("минимальному исходному габариту", summary)
-        self.assertNotIn("детали могут быть повернуты", summary)
-
-    def test_failure_summary_includes_error_and_parts(self) -> None:
+    def test_failure_summary_includes_unplaced_items(self) -> None:
         summary = format_result_summary(
             {
                 "status": "failed",
-                "error": "Packing failed",
-                "stats": {"n_parts": 5},
+                "error": "Не все грузовые места помещаются в кузов.",
+                "packed_count": 1,
+                "unpacked_count": 2,
+                "unplaced_items": [{"name": "crate.step", "quantity": 2}],
+                "stats": {"n_parts": 3},
             }
         )
 
-        self.assertEqual(
-            summary,
-            "\n".join(
-                [
-                    "Не удалось уложить детали",
-                    "Причина: Packing failed",
-                    "Деталей: 5",
-                ]
-            ),
-        )
-
-    def test_failure_summary_includes_limit_exceeded_details(self) -> None:
-        summary = format_result_summary(
-            {
-                "status": "failed",
-                "error": "Не помещается",
-                "limit_exceeded": {"axis": "L", "max": 10000, "actual": 10284, "excess": 284},
-                "stats": {"n_parts": 5},
-            }
-        )
-
-        self.assertEqual(
-            summary,
-            "\n".join(
-                [
-                    "Не удалось уложить детали",
-                    "Причина: Не помещается",
-                    "Превышен лимит: L = 10284 / 10000 мм, +284 мм",
-                    "Деталей: 5",
-                ]
-            ),
-        )
+        self.assertIn("Не все грузовые места помещаются в кузов.", summary)
+        self.assertIn("Размещено мест: 1", summary)
+        self.assertIn("Неразмещено мест: 2", summary)
+        self.assertIn("Список неразмещённых: crate.step x2", summary)
+        self.assertIn("Запрошено всего: 3", summary)
 
 
 if __name__ == "__main__":
