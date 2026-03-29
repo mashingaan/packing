@@ -1,6 +1,6 @@
 #define MyAppName "Packing MVP"
 #ifndef MyAppVersion
-#define MyAppVersion "0.6.1"
+#define MyAppVersion "0.7.0"
 #endif
 #define MyAppPublisher "Packing MVP"
 #define MyAppExeName "Packing.exe"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ def write_packing_report(result_data: dict[str, Any], path: Path) -> Path:
     workbook = Workbook()
     summary_sheet = workbook.active
     summary_sheet.title = "Упаковочный лист"
+    manual_sheet = workbook.create_sheet("Ручное заполнение", 1)
     details_sheet = workbook.create_sheet("Отправочные места")
 
     placed_rows = _placed_rows(result_data)
@@ -20,6 +22,16 @@ def write_packing_report(result_data: dict[str, Any], path: Path) -> Path:
         sheet=summary_sheet,
         placed_rows=placed_rows,
         unplaced_rows=unplaced_rows,
+        result_data=result_data,
+        alignment_cls=Alignment,
+        border_cls=Border,
+        font_cls=Font,
+        fill_cls=PatternFill,
+        side_cls=Side,
+    )
+    _build_manual_sheet(
+        sheet=manual_sheet,
+        placed_rows=placed_rows,
         result_data=result_data,
         alignment_cls=Alignment,
         border_cls=Border,
@@ -165,6 +177,104 @@ def _build_summary_sheet(
     )
 
 
+def _build_manual_sheet(
+    *,
+    sheet: Any,
+    placed_rows: list[dict[str, Any]],
+    result_data: dict[str, Any],
+    alignment_cls: Any,
+    border_cls: Any,
+    font_cls: Any,
+    fill_cls: Any,
+    side_cls: Any,
+) -> None:
+    styles = _styles(
+        alignment_cls=alignment_cls,
+        border_cls=border_cls,
+        font_cls=font_cls,
+        fill_cls=fill_cls,
+        side_cls=side_cls,
+    )
+
+    sheet.merge_cells("A1:K1")
+    sheet["A1"] = "Лист для ручного заполнения"
+    sheet["A1"].font = styles["title_font"]
+    sheet["A1"].alignment = styles["title_alignment"]
+
+    sheet.merge_cells("A2:K2")
+    sheet["A2"] = (
+        "Номера мест и габариты заполнены автоматически. "
+        "Содержимое, вес и примечания можно перенести вручную из конструкторского Excel."
+    )
+    sheet["A2"].font = styles["note_font"]
+    sheet["A2"].alignment = styles["wrap_alignment"]
+
+    truck = result_data.get("truck") or {}
+    sheet["A4"] = "Кузов (мм)"
+    sheet["A4"].font = styles["label_font"]
+    sheet["B4"] = _truck_dims_text(truck)
+    sheet["B4"].alignment = styles["wrap_alignment"]
+
+    headers = (
+        "№ места",
+        "item_id",
+        "Наименование места",
+        "Источник",
+        "Габариты места (мм)",
+        "Всего мест типа",
+        "Содержимое",
+        "Вес, кг",
+        "Количество в месте",
+        "Габариты из КД",
+        "Примечание",
+    )
+    header_row = 6
+    _write_table_header(sheet=sheet, row_index=header_row, headers=headers, styles=styles)
+
+    next_row = header_row + 1
+    if placed_rows:
+        for row in placed_rows:
+            values = (
+                row["place_no"],
+                row["item_id"],
+                row["name"],
+                row["source_label"],
+                row["dims_text"],
+                row["type_total_quantity"],
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            _write_row(sheet=sheet, row_index=next_row, values=values, styles=styles)
+            next_row += 1
+    else:
+        sheet.merge_cells(start_row=next_row, start_column=1, end_row=next_row, end_column=11)
+        sheet.cell(next_row, 1).value = "Размещённые места отсутствуют."
+        sheet.cell(next_row, 1).alignment = styles["wrap_alignment"]
+        sheet.cell(next_row, 1).border = styles["cell_border"]
+
+    sheet.freeze_panes = f"A{header_row + 1}"
+    sheet.auto_filter.ref = f"A{header_row}:K{max(header_row + 1, header_row + len(placed_rows))}"
+    _apply_sheet_layout(
+        sheet=sheet,
+        widths={
+            "A": 12,
+            "B": 18,
+            "C": 28,
+            "D": 36,
+            "E": 20,
+            "F": 16,
+            "G": 32,
+            "H": 12,
+            "I": 18,
+            "J": 20,
+            "K": 26,
+        },
+    )
+
+
 def _build_details_sheet(
     *,
     sheet: Any,
@@ -306,10 +416,12 @@ def _styles(*, alignment_cls: Any, border_cls: Any, font_cls: Any, fill_cls: Any
 
 def _placed_rows(result_data: dict[str, Any]) -> list[dict[str, Any]]:
     placed_items = list(result_data.get("placed_items") or [])
+    type_totals = _type_totals(result_data=result_data, placed_items=placed_items)
     rows: list[dict[str, Any]] = []
     for index, item in enumerate(_sorted_placed_items(placed_items), start=1):
         position = item.get("position_mm") or {}
         dims = item.get("dimensions_mm") or {}
+        item_id = str(item.get("item_id") or "")
         x = _as_number(position.get("x"))
         y = _as_number(position.get("y"))
         z = _as_number(position.get("z"))
@@ -319,12 +431,13 @@ def _placed_rows(result_data: dict[str, Any]) -> list[dict[str, Any]]:
         rows.append(
             {
                 "place_no": int(item.get("place_no") or index),
-                "item_id": str(item.get("item_id") or ""),
+                "item_id": item_id,
                 "instance_id": str(item.get("instance_id") or ""),
-                "name": str(item.get("name") or item.get("item_id") or "Место"),
+                "name": str(item.get("name") or item_id or "Место"),
                 "rotation": str(item.get("rotation") or "XYZ"),
                 "source_label": str(item.get("source_path") or "Ручной ящик"),
                 "source_kind_label": "Ручной" if item.get("source_kind") == "manual" else "STEP",
+                "type_total_quantity": type_totals.get(item_id, 1),
                 "x": x,
                 "y": y,
                 "z": z,
@@ -336,6 +449,24 @@ def _placed_rows(result_data: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _type_totals(*, result_data: dict[str, Any], placed_items: list[dict[str, Any]]) -> dict[str, int]:
+    catalog = result_data.get("catalog") or []
+    catalog_totals: dict[str, int] = {}
+    if isinstance(catalog, list):
+        for item in catalog:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("item_id") or "")
+            quantity = int(item.get("quantity") or 0)
+            if item_id and quantity > 0:
+                catalog_totals[item_id] = quantity
+    if catalog_totals:
+        return catalog_totals
+
+    counts = Counter(str(item.get("item_id") or "") for item in placed_items if item.get("item_id"))
+    return {item_id: quantity for item_id, quantity in counts.items() if item_id}
 
 
 def _unplaced_rows(result_data: dict[str, Any]) -> list[dict[str, Any]]:

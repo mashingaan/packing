@@ -5,6 +5,7 @@ from pathlib import Path
 import queue
 import threading
 import tkinter as tk
+import webbrowser
 from tkinter import filedialog, font, messagebox, ttk
 from typing import Any, Sequence
 
@@ -38,6 +39,16 @@ from packing_mvp.runner import (
     run_packing_job,
 )
 from packing_mvp.step_extract import extract_catalog_item
+from packing_mvp.update_config import AUTO_CHECK_FOR_UPDATES
+from packing_mvp.updater import (
+    ReleaseInfo,
+    UpdateCheckResult,
+    can_apply_update,
+    check_for_updates,
+    download_update,
+    is_update_configured,
+    start_update_installer,
+)
 from packing_mvp.visualization import open_3d_preview
 
 STEP_FILE_SUFFIXES = {".step", ".stp"}
@@ -204,9 +215,11 @@ class PackingGui(tk.Tk):
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._poll_after_id: str | None = None
         self._dragdrop_after_id: str | None = None
+        self._auto_update_check_after_id: str | None = None
         self._destroying = False
         self._running = False
         self._loading_inputs = False
+        self._update_busy = False
         self._advanced_visible = False
         self._selected_item_id: str | None = None
         self._last_result: PackingRunResult | None = None
@@ -235,6 +248,8 @@ class PackingGui(tk.Tk):
         self._set_status_banner(NEUTRAL_BANNER)
         self._poll_after_id = self.after(150, self._poll_events)
         self._dragdrop_after_id = self.after(50, self._configure_dragdrop)
+        if AUTO_CHECK_FOR_UPDATES and can_apply_update() and is_update_configured():
+            self._auto_update_check_after_id = self.after(1200, self._auto_check_for_updates)
         self.bind("<Configure>", self._on_window_configure)
         self.bind_all("<MouseWheel>", self._handle_global_mousewheel, add="+")
 
@@ -248,6 +263,11 @@ class PackingGui(tk.Tk):
         if self._dragdrop_after_id is not None:
             try:
                 self.after_cancel(self._dragdrop_after_id)
+            except tk.TclError:
+                pass
+        if self._auto_update_check_after_id is not None:
+            try:
+                self.after_cancel(self._auto_update_check_after_id)
             except tk.TclError:
                 pass
         try:
@@ -584,6 +604,12 @@ class PackingGui(tk.Tk):
         if event.widget is self:
             self.banner_label.configure(wraplength=max(self.winfo_width() - 140, 480))
 
+    def _auto_check_for_updates(self) -> None:
+        self._auto_update_check_after_id = None
+        if self._destroying or self._update_busy:
+            return
+        self._begin_update_check(user_initiated=False)
+
     def _resize_form(self, event: tk.Event[tk.Canvas]) -> None:
         self.scroll_canvas.itemconfigure(self.form_window, width=event.width)
         self._update_scrollregion()
@@ -622,19 +648,7 @@ class PackingGui(tk.Tk):
         return make_default_output_dir(Path.cwd() / "manual_item.step")
 
     def _build_catalog_item_from_path(self, resolved: Path, *, item_id: str, scale: float) -> CatalogItem:
-        try:
-            return extract_catalog_item(resolved, item_id=item_id, quantity=1, scale=scale)
-        except Exception as exc:
-            return CatalogItem(
-                item_id=item_id,
-                filename=resolved.name,
-                source_path=str(resolved),
-                detected_dims_mm=(1.0, 1.0, 1.0),
-                dimensions_mm=(1.0, 1.0, 1.0),
-                source_kind="step",
-                quantity=1,
-                manual_override=True,
-            )
+        return extract_catalog_item(resolved, item_id=item_id, quantity=1, scale=scale)
 
     def _apply_loaded_catalog_items(self, items: Sequence[CatalogItem]) -> None:
         if not items:
@@ -649,6 +663,43 @@ class PackingGui(tk.Tk):
             log_message=f"Добавлено типов: {len(items)}",
         )
         self._refresh_catalog()
+
+    def _handle_loaded_input_batch(
+        self,
+        *,
+        items: Sequence[CatalogItem],
+        failed_messages: Sequence[str],
+    ) -> None:
+        self._apply_loaded_catalog_items(items)
+        if failed_messages:
+            self._report_input_load_failures(failed_messages, loaded_any=bool(items))
+
+    def _report_input_load_failures(
+        self,
+        failed_messages: Sequence[str],
+        *,
+        loaded_any: bool,
+    ) -> None:
+        preview = list(failed_messages[:5])
+        if len(failed_messages) > 5:
+            preview.append(f"... и ещё {len(failed_messages) - 5}.")
+        for message in failed_messages:
+            self._append_log(message)
+        self.status_var.set(
+            "Часть STEP-файлов не загружена. Проверьте журнал."
+            if loaded_any
+            else "Не удалось загрузить STEP-файлы. Проверьте журнал."
+        )
+        self._set_status_banner(ERROR_BANNER)
+        messagebox.showerror(
+            "Загрузка STEP",
+            (
+                "Часть STEP-файлов не удалось обработать:\n\n"
+                if loaded_any
+                else "Не удалось определить габариты STEP-файлов:\n\n"
+            )
+            + "\n".join(preview),
+        )
 
     def _load_input_paths_async(self, input_paths: Sequence[Path]) -> None:
         if self._running or self._loading_inputs:
@@ -682,10 +733,14 @@ class PackingGui(tk.Tk):
 
         def worker() -> None:
             loaded_items: list[CatalogItem] = []
+            failed_messages: list[str] = []
             for index, (resolved, item_id) in enumerate(pending, start=1):
                 self._events.put(("status", f"Загрузка STEP {index}/{len(pending)}: {resolved.name}"))
-                loaded_items.append(self._build_catalog_item_from_path(resolved, item_id=item_id, scale=scale))
-            self._events.put(("inputs_loaded", loaded_items))
+                try:
+                    loaded_items.append(self._build_catalog_item_from_path(resolved, item_id=item_id, scale=scale))
+                except Exception as exc:
+                    failed_messages.append(f"Не удалось определить габариты для {resolved.name}: {exc}")
+            self._events.put(("inputs_loaded", (loaded_items, failed_messages)))
 
         self._loader_thread = threading.Thread(target=worker, daemon=True)
         self._loader_thread.start()
@@ -733,6 +788,10 @@ class PackingGui(tk.Tk):
         self._loading_inputs = loading
         self._update_control_states()
 
+    def _set_update_busy(self, busy: bool) -> None:
+        self._update_busy = busy
+        self._update_control_states()
+
     def _update_control_states(self) -> None:
         busy = self._running or self._loading_inputs
         state = "disabled" if busy else "normal"
@@ -741,7 +800,6 @@ class PackingGui(tk.Tk):
             self.select_input_button,
             self.add_manual_button,
             self.advanced_toggle_button,
-            self.check_updates_button,
             self.output_button,
             self.save_project_button,
             self.load_project_button,
@@ -749,6 +807,7 @@ class PackingGui(tk.Tk):
             self.open_3d_button,
         ):
             widget.configure(state=state)
+        self.check_updates_button.configure(state="disabled" if busy or self._update_busy else "normal")
         self._update_selected_action_states()
 
     def _update_selected_action_states(self) -> None:
@@ -818,6 +877,7 @@ class PackingGui(tk.Tk):
             if item.source_path and not item.is_manual
         }
         loaded_items: list[CatalogItem] = []
+        failed_messages: list[str] = []
         reserved_ids: set[str] = set()
         for path in input_paths:
             resolved = Path(path).resolve()
@@ -828,20 +888,11 @@ class PackingGui(tk.Tk):
             try:
                 item = extract_catalog_item(resolved, item_id=item_id, quantity=1, scale=float(self.scale_var.get() or "1.0"))
             except Exception as exc:
-                self._append_log(f"Не удалось определить габариты для {resolved.name}: {exc}")
-                item = CatalogItem(
-                    item_id=item_id,
-                    filename=resolved.name,
-                    source_path=str(resolved),
-                    detected_dims_mm=(1.0, 1.0, 1.0),
-                    dimensions_mm=(1.0, 1.0, 1.0),
-                    source_kind="step",
-                    quantity=1,
-                    manual_override=True,
-                )
+                failed_messages.append(f"Не удалось определить габариты для {resolved.name}: {exc}")
+                continue
             loaded_items.append(item)
             existing.add(resolved)
-        self._apply_loaded_catalog_items(loaded_items)
+        self._handle_loaded_input_batch(items=loaded_items, failed_messages=failed_messages)
 
     def _refresh_catalog(self) -> None:
         self.catalog_tree.delete(*self.catalog_tree.get_children())
@@ -1025,10 +1076,31 @@ class PackingGui(tk.Tk):
                 self._append_log(str(payload))
             elif event_type == "inputs_loaded":
                 self._set_loading_inputs(False)
-                self._apply_loaded_catalog_items(payload if isinstance(payload, list) else [])
+                loaded_items: Sequence[CatalogItem]
+                failed_messages: Sequence[str]
+                if (
+                    isinstance(payload, tuple)
+                    and len(payload) == 2
+                    and isinstance(payload[0], (list, tuple))
+                    and isinstance(payload[1], (list, tuple))
+                ):
+                    loaded_items = payload[0]
+                    failed_messages = tuple(str(message) for message in payload[1])
+                else:
+                    loaded_items = payload if isinstance(payload, list) else []
+                    failed_messages = ()
+                self._handle_loaded_input_batch(items=loaded_items, failed_messages=failed_messages)
             elif event_type == "done":
                 self._handle_result(payload)
                 break
+            elif event_type == "update_check_finished":
+                result, user_initiated = payload
+                self._handle_update_check_result(result, user_initiated=user_initiated)
+            elif event_type == "update_install_started":
+                release_info, launch_script_path = payload
+                self._handle_update_install_started(release_info, launch_script_path=launch_script_path)
+            elif event_type == "update_install_failed":
+                self._handle_update_install_failed(str(payload))
         if not self._destroying:
             self._poll_after_id = self.after(150, self._poll_events)
 
@@ -1084,7 +1156,119 @@ class PackingGui(tk.Tk):
             messagebox.showerror("3D-предпросмотр", str(exc))
 
     def _check_updates_clicked(self) -> None:
-        self.update_status_var.set(f"Версия {__version__}. Автоматические обновления в этой сборке не настроены.")
+        self._begin_update_check(user_initiated=True)
+
+    def _begin_update_check(self, *, user_initiated: bool) -> None:
+        if self._update_busy or self._destroying:
+            return
+
+        self._set_update_busy(True)
+        self.update_status_var.set("Проверка обновлений...")
+        self._append_log("Проверка обновлений через GitHub Releases...")
+
+        def worker() -> None:
+            try:
+                result = check_for_updates(current_version=__version__)
+            except Exception as exc:
+                result = UpdateCheckResult(
+                    current_version=__version__,
+                    latest_version=None,
+                    update_available=False,
+                    error=str(exc),
+                )
+            self._events.put(("update_check_finished", (result, user_initiated)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _handle_update_check_result(self, result: UpdateCheckResult, *, user_initiated: bool) -> None:
+        self._set_update_busy(False)
+        if self._destroying:
+            return
+
+        if result.error:
+            self.update_status_var.set(f"Версия {result.current_version}. Ошибка проверки обновлений.")
+            self._append_log(f"Ошибка проверки обновлений: {result.error}")
+            if user_initiated:
+                messagebox.showerror("Обновления", result.error)
+            return
+
+        if not result.update_available or result.release_info is None:
+            version = result.latest_version or result.current_version
+            self.update_status_var.set(f"Версия {version} актуальна.")
+            self._append_log(f"Актуальная версия уже установлена: {version}")
+            if user_initiated:
+                messagebox.showinfo("Обновления", f"У вас уже установлена актуальная версия {version}.")
+            return
+
+        release_info = result.release_info
+        self.update_status_var.set(f"Доступно обновление {release_info.version}.")
+        self._append_log(f"Найдена новая версия {release_info.version}: {release_info.release_url}")
+
+        if can_apply_update():
+            should_install = messagebox.askyesno(
+                "Обновление доступно",
+                f"Доступна версия {release_info.version}.\n\nСкачать и установить её сейчас?",
+            )
+            if should_install:
+                self._start_update_download(release_info)
+            elif user_initiated and release_info.release_url:
+                self._append_log("Пользователь отложил установку обновления.")
+            return
+
+        should_open_release = messagebox.askyesno(
+            "Обновление доступно",
+            (
+                f"Доступна версия {release_info.version}.\n\n"
+                "Автоустановка доступна только в установленной Windows-сборке.\n"
+                "Открыть страницу релиза?"
+            ),
+        )
+        if should_open_release:
+            _open_url(release_info.release_url)
+
+    def _start_update_download(self, release_info: ReleaseInfo) -> None:
+        if self._update_busy or self._destroying:
+            return
+
+        self._set_update_busy(True)
+        self.update_status_var.set(f"Скачивание обновления {release_info.version}...")
+        self._append_log(f"Скачивание обновления {release_info.version}...")
+
+        def worker() -> None:
+            try:
+                downloaded_update = download_update(release_info)
+                launch_script_path = start_update_installer(downloaded_update)
+            except Exception as exc:
+                self._events.put(("update_install_failed", str(exc)))
+                return
+            self._events.put(("update_install_started", (release_info, launch_script_path)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _handle_update_install_started(self, release_info: ReleaseInfo, *, launch_script_path: Path) -> None:
+        self._set_update_busy(False)
+        if self._destroying:
+            return
+
+        self.update_status_var.set(f"Установка обновления {release_info.version} запущена.")
+        self._append_log(f"Запущен установщик обновления: {launch_script_path}")
+        messagebox.showinfo(
+            "Обновление",
+            (
+                f"Установка версии {release_info.version} запущена.\n\n"
+                "Приложение будет закрыто, чтобы завершить обновление."
+            ),
+        )
+        self.after(100, self.destroy)
+
+    def _handle_update_install_failed(self, error_message: str) -> None:
+        self._set_update_busy(False)
+        if self._destroying:
+            return
+
+        self.update_status_var.set(f"Версия {__version__}. Не удалось установить обновление.")
+        self._append_log(f"Не удалось установить обновление: {error_message}")
+        messagebox.showerror("Обновление", error_message)
 
     def _set_running(self, running: bool) -> None:
         self._running = running
@@ -1149,6 +1333,15 @@ def _open_path(path: Path) -> None:
         os.startfile(str(resolved))  # type: ignore[attr-defined]
     except AttributeError:
         messagebox.showinfo("Путь", str(resolved))
+
+
+def _open_url(url: str) -> None:
+    try:
+        os.startfile(url)  # type: ignore[attr-defined]
+        return
+    except (AttributeError, OSError):
+        pass
+    webbrowser.open(url, new=2)
 
 
 def _format_mm_value(value: Any) -> str:

@@ -83,9 +83,29 @@ class GuiBehaviorTests(unittest.TestCase):
             first.write_text("x", encoding="utf-8")
             second.write_text("x", encoding="utf-8")
 
+            def fake_extract_catalog_item(
+                input_path: Path,
+                *,
+                item_id: str,
+                quantity: int = 1,
+                scale: float = 1.0,
+                logger: object | None = None,
+            ) -> CatalogItem:
+                del quantity, scale, logger
+                resolved = Path(input_path).resolve()
+                return CatalogItem(
+                    item_id=item_id,
+                    filename=resolved.name,
+                    source_path=str(resolved),
+                    detected_dims_mm=(1200.0, 800.0, 700.0),
+                    dimensions_mm=(1200.0, 800.0, 700.0),
+                    quantity=1,
+                )
+
             app = self._build_app()
             try:
-                app._apply_input_paths([first, second])
+                with patch("packing_mvp.gui.extract_catalog_item", side_effect=fake_extract_catalog_item):
+                    app._apply_input_paths([first, second])
                 first_id = app._catalog_items[0].item_id
                 second_id = app._catalog_items[1].item_id
                 app._input_quantity_vars[first_id].set("2")

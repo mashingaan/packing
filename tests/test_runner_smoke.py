@@ -104,7 +104,7 @@ class RunnerSmokeTests(unittest.TestCase):
             self.assertEqual(len(data["catalog"]), 2)
             self.assertEqual([item["place_no"] for item in data["placed_items"]], [1, 2, 3])
             workbook = load_workbook(result.out_dir / "packing_report.xlsx")
-            self.assertEqual(workbook.sheetnames, ["Упаковочный лист", "Отправочные места"])
+            self.assertEqual(workbook.sheetnames, ["Упаковочный лист", "Ручное заполнение", "Отправочные места"])
 
     def test_run_packing_job_reports_unplaced_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

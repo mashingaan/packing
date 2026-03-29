@@ -16,13 +16,17 @@ from packing_mvp.excel_report import write_packing_report
 
 
 class ExcelReportTests(unittest.TestCase):
-    def test_write_packing_report_creates_two_sheets_with_place_numbers(self) -> None:
+    def test_write_packing_report_creates_manual_sheet_with_place_numbers(self) -> None:
         result_data = {
             "success": True,
             "packed_count": 2,
             "unpacked_count": 1,
             "truck": {"length_mm": 13400, "width_mm": 2350, "height_mm": 2400},
             "used_extents_mm": {"L": 3000, "W": 1200, "H": 1000},
+            "catalog": [
+                {"item_id": "item_001", "quantity": 4},
+                {"item_id": "item_002", "quantity": 2},
+            ],
             "placed_items": [
                 {
                     "place_no": 2,
@@ -54,8 +58,9 @@ class ExcelReportTests(unittest.TestCase):
             path = write_packing_report(result_data, Path(tmp_dir) / "packing_report.xlsx")
             workbook = load_workbook(path)
 
-        self.assertEqual(workbook.sheetnames, ["Упаковочный лист", "Отправочные места"])
+        self.assertEqual(workbook.sheetnames, ["Упаковочный лист", "Ручное заполнение", "Отправочные места"])
         summary = workbook["Упаковочный лист"]
+        manual = workbook["Ручное заполнение"]
         details = workbook["Отправочные места"]
         self.assertEqual(summary["A1"].value, "Упаковочный лист")
         self.assertEqual(summary["A12"].value, 1)
@@ -63,6 +68,12 @@ class ExcelReportTests(unittest.TestCase):
         self.assertEqual(summary["A13"].value, 2)
         self.assertEqual(summary["A18"].value, "Third")
         self.assertEqual(summary["B18"].value, 1)
+        self.assertEqual(manual["A1"].value, "Лист для ручного заполнения")
+        self.assertEqual(manual["A7"].value, 1)
+        self.assertEqual(manual["C7"].value, "First")
+        self.assertEqual(manual["F7"].value, 4)
+        self.assertIsNone(manual["G7"].value)
+        self.assertEqual(manual["A8"].value, 2)
         self.assertEqual(details["A7"].value, 1)
         self.assertEqual(details["D7"].value, "First")
         self.assertEqual(details["A8"].value, 2)
