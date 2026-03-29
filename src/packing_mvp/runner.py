@@ -15,13 +15,15 @@ from packing_mvp.catalog import (
     build_parts_from_catalog,
     total_requested_items,
 )
+from packing_mvp.excel_report import write_packing_report
 from packing_mvp.export import (
     build_failure_result,
     build_truck_packing_result,
+    sort_placements_for_display,
     write_placements_csv,
     write_result_json,
 )
-from packing_mvp.packer import PackingError, pack_items_in_truck, pack_parts
+from packing_mvp.packer import PackingError, TruckPackOutcome, pack_items_in_truck, pack_parts
 from packing_mvp.step_export import export_arranged_step, export_packed_scene
 from packing_mvp.step_extract import extract_catalog_item, extract_parts_from_step_files
 from packing_mvp.step_merge import merge_step_files
@@ -99,6 +101,7 @@ class PackingRunResult:
     preview_side_path: Path | None
     result_data: dict[str, Any]
     preview_gif_path: Path | None = None
+    report_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +114,7 @@ class PackingArtifacts:
     preview_top_path: Path
     preview_side_path: Path
     preview_gif_path: Path
+    report_path: Path
 
 
 def make_default_output_dir(input_path: Path) -> Path:
@@ -159,29 +163,38 @@ def run_packing_job(
             gap=float(request.gap),
             logger=logger,
         )
+        ordered_placements = sort_placements_for_display(outcome.placements)
+        outcome_for_output = TruckPackOutcome(
+            placements=ordered_placements,
+            unplaced_parts=outcome.unplaced_parts,
+            used_extents=outcome.used_extents,
+            container_dims=outcome.container_dims,
+            fill_ratio_bbox=outcome.fill_ratio_bbox,
+            fill_ratio_truck=outcome.fill_ratio_truck,
+        )
 
-        if outcome.placements:
+        if outcome_for_output.placements:
             _notify(status_callback, "Запись таблицы размещения...")
-            write_placements_csv(outcome.placements, artifacts.placements_path)
+            write_placements_csv(outcome_for_output.placements, artifacts.placements_path)
 
             _notify(status_callback, "Экспорт STEP-сборки...")
             export_mode = export_packed_scene(
-                outcome.placements,
+                outcome_for_output.placements,
                 artifacts.arranged_step_path,
                 logger=logger,
             )
 
             _notify(status_callback, "Построение превью...")
             render_previews(
-                placements=outcome.placements,
+                placements=outcome_for_output.placements,
                 out_dir=artifacts.out_dir,
-                container_dims=outcome.container_dims,
+                container_dims=outcome_for_output.container_dims,
                 logger=logger,
             )
             preview_gif_path = _render_preview_gif_best_effort(
-                placements=outcome.placements,
+                placements=outcome_for_output.placements,
                 out_dir=artifacts.out_dir,
-                container_dims=outcome.container_dims,
+                container_dims=outcome_for_output.container_dims,
                 output_path=artifacts.preview_gif_path,
                 logger=logger,
             )
@@ -193,11 +206,13 @@ def run_packing_job(
             input_paths=request.input_paths,
             catalog_items=catalog_items,
             constraints=constraints,
-            outcome=outcome,
+            outcome=outcome_for_output,
             units=units,
             export_mode=export_mode,
         )
         write_result_json(result_data, artifacts.result_path)
+        _notify(status_callback, "Р¤РѕСЂРјРёСЂРѕРІР°РЅРёРµ Excel-РѕС‚С‡С‘С‚Р°...")
+        report_path = write_packing_report(result_data, artifacts.report_path)
         exit_code = 0 if result_data["success"] else 2
         logger.info(
             "Packing finished with status=%s packed=%s unpacked=%s",
@@ -215,6 +230,7 @@ def run_packing_job(
             preview_top_path=artifacts.preview_top_path if artifacts.preview_top_path.exists() else None,
             preview_side_path=artifacts.preview_side_path if artifacts.preview_side_path.exists() else None,
             preview_gif_path=preview_gif_path,
+            report_path=report_path if report_path.exists() else None,
             result_data=result_data,
         )
     except Exception as exc:
@@ -241,6 +257,7 @@ def run_packing_job(
             preview_top_path=artifacts.preview_top_path if artifacts.preview_top_path.exists() else None,
             preview_side_path=artifacts.preview_side_path if artifacts.preview_side_path.exists() else None,
             preview_gif_path=artifacts.preview_gif_path if artifacts.preview_gif_path.exists() else None,
+            report_path=artifacts.report_path if artifacts.report_path.exists() else None,
             result_data=result_data,
         )
     finally:
@@ -311,6 +328,7 @@ def create_failure_run_result(
             preview_top_path=None,
             preview_side_path=None,
             preview_gif_path=None,
+            report_path=None,
             result_data=result_data,
         )
     finally:
@@ -319,7 +337,7 @@ def create_failure_run_result(
 
 def _prepare_artifacts(request: PackingRequest) -> PackingArtifacts:
     out_dir = ensure_directory(Path(request.out_dir))
-    return PackingArtifacts(
+    artifacts = PackingArtifacts(
         out_dir=out_dir,
         result_path=out_dir / "result.json",
         placements_path=out_dir / "placements.csv",
@@ -328,7 +346,20 @@ def _prepare_artifacts(request: PackingRequest) -> PackingArtifacts:
         preview_top_path=out_dir / "preview_top.png",
         preview_side_path=out_dir / "preview_side.png",
         preview_gif_path=out_dir / "preview.gif",
+        report_path=out_dir / "packing_report.xlsx",
     )
+    for path in (
+        artifacts.result_path,
+        artifacts.placements_path,
+        artifacts.arranged_step_path,
+        artifacts.log_path,
+        artifacts.preview_top_path,
+        artifacts.preview_side_path,
+        artifacts.preview_gif_path,
+        artifacts.report_path,
+    ):
+        path.unlink(missing_ok=True)
+    return artifacts
 
 
 def _resolve_catalog_items(

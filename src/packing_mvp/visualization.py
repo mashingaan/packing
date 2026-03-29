@@ -42,7 +42,7 @@ def open_3d_preview(parent: Any, result_data: dict[str, Any]) -> Any:
             x + dx / 2.0,
             y + dy / 2.0,
             z + dz + max(20.0, dz * 0.02),
-            str(index + 1),
+            str(item.get("place_no") or (index + 1)),
             color="#1f2933",
         )
 

@@ -1,28 +1,67 @@
 # packing-mvp
 
-MVP tool for packing STEP geometry into a container using axis-aligned bounding boxes from `gmsh` / OpenCASCADE. The solver is bbox-based: it does not run exact mesh collision checks.
+`packing-mvp` — Windows desktop-приложение для укладки грузовых мест, заданных STEP-файлами, в кузов грузовика.
 
-## What It Does
+Текущий продуктовый сценарий:
 
-- reads `.step` / `.stp` files through `gmsh`
-- extracts solids and their bounding boxes
-- optionally auto-scales meter-based geometry to millimeters
-- packs bounding boxes with an extreme-points heuristic
-- writes:
-  - `result.json`
-  - `placements.csv`
-  - `arranged.step`
-  - `preview_top.png`
-  - `preview_side.png`
-  - `preview.gif`
-  - `packing.log`
+- пользователь загружает один или несколько `.step` / `.stp`
+- каждый STEP трактуется как один тип грузового места
+- приложение автоматически определяет общие габариты `Д x Ш x В`
+- при необходимости пользователь вручную исправляет размеры и количество
+- выполняется практическая MVP-укладка в кузов
+- результат показывается в GUI, сохраняется в `result.json` и может экспортироваться в STEP
 
-## Requirements
+README описывает именно этот V2 workflow. Старые экспериментальные режимы исследований по жёстким сборкам не являются рекомендуемым сценарием для текущего продукта.
 
-- Windows 11
+## Возможности
+
+- загрузка STEP AP203 / AP214
+- автоматическое извлечение общих габаритов из STEP
+- ручная корректировка размеров
+- количество для каждого типа грузового места
+- удаление позиции из проекта
+- физическое удаление STEP-файла с диска с подтверждением
+- настройка кузова:
+  - длина
+  - ширина
+  - высота
+  - зазор между соседними местами
+- упаковка нескольких типов одновременно
+- отчёт о неразмещённых местах, если всё не помещается
+- 2D-превью и 3D-предпросмотр
+- экспорт результата в STEP
+- сохранение / загрузка проекта `.packproj`
+- фоновый расчёт и журнал сообщений
+
+## Правила упаковки MVP
+
+- один STEP-файл = один тип грузового места
+- упаковщик работает по общим габаритам, а не по разбору модели на дочерние тела
+- допустимы только две ориентации для каждого типа:
+  - исходная `Д, Ш, В`
+  - поворот вокруг вертикальной оси на 90°: `Ш, Д, В`
+- наклоны по `X` / `Y` не допускаются
+- место должно оставаться стоящим на основании
+- зазор применяется по длине и ширине
+- пересечения между местами запрещены
+- выход за габариты кузова запрещён
+- если всё не помещается, результат обязан содержать список неразмещённых мест
+
+Алгоритм упаковки в MVP жадный, а не оптимальный. Цель — надёжный и понятный практический результат, а не математически точный глобальный оптимум.
+
+## Габариты кузова по умолчанию
+
+- длина: `13400` мм
+- ширина: `2350` мм
+- высота: `2400` мм
+- зазор: `50` мм
+
+## Требования
+
+- Windows 10 / 11
 - Python 3.10+
 
-## Install
+## Установка
 
 ```powershell
 cd C:\path\to\packing-mvp
@@ -32,208 +71,192 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-`python -m pip install -e .` installs both `gmsh` for bbox extraction and `cadquery-ocp` (`OCP`) for single-root STEP export.
+Пакет устанавливает основные зависимости для работы с STEP и визуализацией:
 
-## CLI
+- `gmsh`
+- `cadquery-ocp` / `OCP`
+- `numpy`
+- `matplotlib`
+- `pillow`
+- `windnd`
 
-Basic run:
-
-```powershell
-python -m packing_mvp.cli --input "part.step" --out out --maxW 2400 --maxH 1800 --maxL 4400 --gap 10
-```
-
-Search the minimal working length:
-
-```powershell
-python -m packing_mvp.cli --input "part.step" --out out --maxW 2400 --maxH 1800 --gap 10
-```
-
-Export `arranged.step` in source STEP units:
-
-```powershell
-python -m packing_mvp.cli --input "part.step" --out out --maxW 2400 --maxH 1800 --gap 10 --step-units source
-```
-
-Force only flat placements:
-
-```powershell
-python -m packing_mvp.cli --input "part.step" --out out --maxW 2400 --maxH 1800 --maxL 4400 --gap 10 --flat-only
-```
-
-Treat the whole STEP as one rigid assembly and keep it flat:
-
-```powershell
-python -m packing_mvp.cli --input "part.step" --out out --maxW 2400 --maxH 1800 --maxL 4400 --gap 10 --flat-only --treat-input-as-single-item
-```
-
-## Packing Modes
-
-### Default `solids` mode
-
-This is the existing behavior.
-
-- the STEP file is split into separate solids
-- each solid becomes its own packing item
-- each solid can receive its own placement and rotation
-- `placements.csv` keeps the original solid-oriented schema
-- `arranged.step` is rebuilt from per-solid placements
-
-Use this when the input file really contains independent parts that may be rearranged separately.
-
-### `--treat-input-as-single-item`
-
-This is the single-root-shape mode.
-
-- the whole input STEP is treated as one rigid item
-- the whole input STEP is preserved as one root shape / compound during export
-- all source solids keep their internal relative positions
-- the packer places and rotates only the aggregate bounding box of the whole model
-- `placements.csv` contains one row per rigid group with:
-  - `item_id`
-  - `mode`
-  - `source_count`
-  - `source_tags`
-  - `dx,dy,dz`
-  - `x,y,z`
-  - `rot`
-  - `bbox_minx,bbox_miny,bbox_minz,bbox_maxx,bbox_maxy,bbox_maxz`
-- `result.json` reports `packing_mode: "single_root_shape"`
-- `arranged.step` writes one transformed root object, not an exploded list of child solids
-
-Use this for welded assemblies, fixture nodes, pipe-plus-plate models, or any STEP that must not be split into independent parts.
-
-## `--flat-only`
-
-`--flat-only` restricts allowed orientations to lying-flat positions only.
-
-MVP rule:
-
-- take the original item dimensions
-- compute the minimal original dimension
-- after orientation, the resulting `Z` height must equal that minimal original dimension
-
-Example:
-
-- original dims: `(100, 200, 300)`
-- allowed orientations: only those where the resulting height is `100`
-- disallowed: standing on an edge or an end face
-
-This rule applies to both:
-
-- individual solids in default mode
-- aggregate rigid-group dimensions in `--treat-input-as-single-item` mode
-
-## `arranged.step`
-
-`arranged.step` always uses real source solids from the STEP file, not synthetic boxes.
-
-- in default mode, each source solid gets its own transform from `placements.csv`
-- in `--treat-input-as-single-item` mode, the exporter reads the whole STEP as one root shape, applies one orientation to that root shape, recomputes the rotated root bbox, translates the root shape once, and writes that transformed root object back to STEP
-- no per-child placement or exploded layout is allowed in single-root-shape mode
-- if the STEP contains multiple solids internally, they remain inside one exported transformed root object
-
-## `result.json`
-
-The JSON report includes:
-
-- input file information
-- container constraints
-- recommended packed dimensions
-- used extents
-- packing statistics
-- scale information
-- `treat_input_as_single_item`
-- `flat_only`
-- `packing_mode`
-
-`packing_mode` is always one of:
-
-- `solids`
-- `single_root_shape`
-
-`constraints` also stores:
-
-- `flat_only`
-- `treat_input_as_single_item`
-- `packing_mode`
-
-## GUI
-
-GUI is still available:
+## Запуск GUI
 
 ```powershell
 python -m packing_mvp.gui
 ```
 
-The new rigid-group switch is currently documented and exposed through CLI only.
+или:
 
-## Auto Updates
+```powershell
+packing-gui
+```
 
-The desktop client can now check GitHub Releases and apply a new installer automatically.
+### Базовый рабочий сценарий в GUI
 
-- default releases repo: `mashingaan/packing`
-- default installer asset name: `PackingMVP-Setup.exe`
-- optional checksum asset name: `PackingMVP-Setup.exe.sha256`
+1. Нажмите `Загрузить STEP-файлы`.
+2. Проверьте автоматически определённые размеры в каталоге.
+3. При необходимости отредактируйте `Длина`, `Ширина`, `Высота`, `Количество`.
+4. Уточните параметры кузова.
+5. Нажмите `Рассчитать укладку`.
+6. После расчёта используйте:
+   - `Открыть результат`
+   - `Вид сверху`
+   - `Вид сбоку`
+   - `3D-предпросмотр`
+7. Сохраните проект через `.packproj`, если нужно вернуться к нему позже.
 
-The packaged Windows app shows a `Проверить обновления` button in the GUI header. In a built EXE, the app can:
+## CLI
 
-- check the latest GitHub Release
-- compare the release tag against the current app version
-- download the installer
-- verify SHA256 when the `.sha256` asset is present
-- close the app, run the installer silently, and start the app again
+CLI полезен для пакетного запуска и smoke-test сценариев.
 
-If you need to point the client to a different repo or asset name, override:
+### Пример: несколько STEP-файлов и количество
 
-- `PACKING_MVP_GITHUB_REPO`
-- `PACKING_MVP_RELEASE_ASSET`
+```powershell
+python -m packing_mvp.cli `
+  --input "crate_a.step" "crate_b.step" `
+  --quantity 2 3 `
+  --out out
+```
 
-### Release Workflow
+### Пример: явные размеры кузова и зазор
 
-Build the installer:
+```powershell
+python -m packing_mvp.cli `
+  --input "crate_a.step" "crate_b.step" `
+  --quantity 2 3 `
+  --out out `
+  --maxL 13400 `
+  --maxW 2350 `
+  --maxH 2400 `
+  --gap 50
+```
+
+### Пример: запуск из `.packproj`
+
+```powershell
+python -m packing_mvp.cli --project ".\demo.packproj" --out out
+```
+
+### Поддерживаемые аргументы CLI
+
+- `--input` — один или несколько STEP-файлов
+- `--project` — загрузка `.packproj` вместо сырых STEP-файлов
+- `--quantity` — количество для каждого файла из `--input`
+- `--out` — папка результата
+- `--maxL`, `--maxW`, `--maxH` — габариты кузова в мм
+- `--gap` — зазор в мм
+- `--scale` — ручной множитель масштаба импорта STEP
+- `--seed` — зарезервированный deterministic seed
+
+## Выходные файлы
+
+После успешного или частично успешного расчёта приложение создаёт папку результата с артефактами:
+
+- `result.json`
+- `placements.csv`
+- `arranged.step`
+- `preview_top.png`
+- `preview_side.png`
+- `preview.gif`
+- `packing.log`
+
+## Что содержит `result.json`
+
+`result.json` используется как машинно-читаемый статус расчёта. В нём сохраняются:
+
+- габариты кузова
+- зазор
+- каталог загруженных типов
+- список размещённых мест
+- список неразмещённых мест
+- использованные габариты
+- коэффициент заполнения
+- признак успеха / неуспеха
+- режим упаковки `truck_loading_v2`
+
+Если всё помещается:
+
+- `success = true`
+- `status = "ok"`
+
+Если не всё помещается:
+
+- `success = false`
+- `status = "failed"`
+- в `unplaced_items` будет явный список того, что не удалось разместить
+
+## `.packproj`
+
+Файл проекта `.packproj` хранит:
+
+- список загруженных STEP-типов
+- определённые или вручную исправленные размеры
+- количество
+- параметры кузова
+- результат последнего расчёта, если он уже есть
+
+Формат проекта JSON-совместимый, но с пользовательским расширением `.packproj`.
+
+## STEP-экспорт
+
+`arranged.step` строится в соответствии с рассчитанными размещениями.
+
+Предпочтительный путь MVP:
+
+- экспорт преобразованных исходных моделей STEP
+
+Резервный путь MVP:
+
+- экспорт box-proxy представлений, если конкретный источник не удалось корректно перенести как исходную геометрию
+
+Это поведение сделано намеренно: экспорт должен быть согласован с раскладкой, показанной пользователю.
+
+## 3D-предпросмотр
+
+3D-предпросмотр показывает:
+
+- каркас кузова
+- размещённые грузовые места
+- номера размещений
+- вращение / панорамирование / масштабирование камеры
+
+Для MVP визуализация box-based: пользователь видит раскладку по габаритам, а не полный CAD-рендер каждого объекта.
+
+## Ограничения MVP
+
+- упаковка основана на общих габаритах, а не на точной проверке CAD-коллизий по сложной геометрии
+- алгоритм жадный, а не оптимальный
+- нет произвольного поиска углов
+- нет наклонов по `X` / `Y`
+- один STEP трактуется как один тип грузового места
+- sample STEP-файлы можно использовать для smoke-тестов, но логика не завязана на имена файлов
+
+## Тесты
 
 ```powershell
 cd C:\path\to\packing-mvp
-.\scripts\build_installer.ps1
+python -m pytest -q
 ```
 
-The build now produces:
+Ключевые тестовые сценарии покрывают:
 
-- `dist-installer\PackingMVP-Setup.exe`
-- `dist-installer\PackingMVP-Setup.exe.sha256`
+- извлечение размеров и ручной override
+- разворачивание количества в отдельные экземпляры
+- допустимые ориентации только по `Z`
+- базовое размещение в кузове
+- корректный отчёт по неразмещённым местам
+- сохранение / загрузку `.packproj`
 
-Publish a GitHub Release with a version tag like `v0.5.0` and upload both files. Once the client starts the packaged app, it can detect and install that release without manually sending a new setup file.
+## Структура V2
 
-### GitHub Actions Release
+Основные модули текущего продукта:
 
-The repository now includes `.github/workflows/release.yml`.
-
-It does the following on `v*` tags:
-
-- checks out the repository on `windows-latest`
-- installs Python and Inno Setup
-- verifies that the Git tag matches `packing_mvp.__version__`
-- runs `python -m unittest discover -s tests -v`
-- builds `PackingMVP-Setup.exe` and `PackingMVP-Setup.exe.sha256`
-- uploads both files to the GitHub Release automatically
-
-You can use it in two ways:
-
-1. Update `src/packing_mvp/__init__.py` to the target version, commit, and push a tag like `v0.5.0`.
-2. Or start the workflow manually in GitHub Actions and pass a tag like `v0.5.0`; the workflow will create the tag on the selected commit if it does not exist yet.
-
-## Tests
-
-Run the test suite:
-
-```powershell
-cd C:\path\to\packing-mvp
-python -m unittest discover -s tests -v
-```
-
-## MVP Limits
-
-- packing is bbox-based, not exact CAD collision detection
-- rotations are limited to axis permutations from `ROTATION_ORDERS`
-- `preview_top.png`, `preview_side.png`, and `preview.gif` are bbox previews
-- in rigid-group mode, previews show the aggregate group bbox rather than internal solid geometry
+- `src/packing_mvp/step_extract.py` — извлечение габаритов из STEP
+- `src/packing_mvp/catalog.py` — каталог типов грузовых мест и настройки кузова
+- `src/packing_mvp/packer.py` — MVP-укладка в кузов
+- `src/packing_mvp/project_io.py` — `.packproj`
+- `src/packing_mvp/gui.py` — русский desktop GUI
+- `src/packing_mvp/visualization.py` — 3D-предпросмотр
+- `src/packing_mvp/step_export.py` — экспорт STEP-сцены
+- `src/packing_mvp/export.py` — `result.json` и `placements.csv`

@@ -13,6 +13,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from packing_mvp.catalog import CatalogItem
 from packing_mvp.gui import DEFAULT_GUI_SEED, PackingGui, _format_client_result
 from packing_mvp.runner import PackingRunResult
 
@@ -85,8 +86,10 @@ class GuiBehaviorTests(unittest.TestCase):
             app = self._build_app()
             try:
                 app._apply_input_paths([first, second])
-                app._input_quantity_vars[first.resolve()].set("2")
-                app._input_quantity_vars[second.resolve()].set("3")
+                first_id = app._catalog_items[0].item_id
+                second_id = app._catalog_items[1].item_id
+                app._input_quantity_vars[first_id].set("2")
+                app._input_quantity_vars[second_id].set("3")
                 request = app._build_request()
             finally:
                 app.destroy()
@@ -95,6 +98,26 @@ class GuiBehaviorTests(unittest.TestCase):
         self.assertEqual(request.input_quantities, (2, 3))
         self.assertEqual(request.catalog_items[0].quantity, 2)
         self.assertEqual(request.catalog_items[1].quantity, 3)
+
+    def test_gui_build_request_supports_manual_boxes(self) -> None:
+        app = self._build_app()
+        try:
+            app._apply_loaded_catalog_items(
+                [
+                    CatalogItem.from_manual_box(
+                        item_id="manual_001",
+                        name="Manual crate",
+                        dims_mm=(1200.0, 800.0, 700.0),
+                        quantity=2,
+                    )
+                ]
+            )
+            request = app._build_request()
+        finally:
+            app.destroy()
+
+        self.assertEqual(request.catalog_items[0].source_kind, "manual")
+        self.assertEqual(request.catalog_items[0].quantity, 2)
 
     def test_gui_uses_fit_verdict_for_failure_message(self) -> None:
         app = self._build_app()

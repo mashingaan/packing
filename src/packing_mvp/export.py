@@ -25,12 +25,27 @@ def write_placements_csv(placements: list[Placement], path: Path) -> None:
         raise RuntimeError("Mixed placement modes are not supported in placements.csv output.")
 
 
+def sort_placements_for_display(placements: Iterable[Placement]) -> list[Placement]:
+    return sorted(
+        placements,
+        key=lambda placement: (
+            round(placement.x, 6),
+            round(placement.y, 6),
+            round(placement.z, 6),
+            placement.part.display_name or placement.part.part_id,
+            placement.part.source_part_id or placement.part.part_id,
+            placement.part_id,
+        ),
+    )
+
+
 def build_success_result(
     input_paths: Sequence[Path],
     constraints: dict[str, Any],
     outcome: PackOutcome,
     units: dict[str, Any],
 ) -> dict[str, Any]:
+    ordered_placements = sort_placements_for_display(outcome.placements)
     fit_verdict = validate_constraints(outcome, constraints)
     if not fit_verdict["fits"]:
         raise DoesNotFitError(format_constraint_failure_message(fit_verdict))
@@ -46,7 +61,10 @@ def build_success_result(
         "does_not_fit": False,
         "violations": [],
         "limit_exceeded": None,
-        "placed_items": [_placement_payload(placement) for placement in outcome.placements],
+        "placed_items": [
+            _placement_payload(placement, place_no=index)
+            for index, placement in enumerate(ordered_placements, start=1)
+        ],
         "unplaced_items": [],
         "recommended_dims_mm": {
             "L": outcome.recommended_dims[0],
@@ -153,7 +171,11 @@ def build_truck_packing_result(
     }
     used_extents = outcome.used_extents if outcome is not None else None
     fit_verdict = validate_constraints(used_extents, constraints)
-    placed_items = [_placement_payload(placement) for placement in (outcome.placements if outcome else [])]
+    ordered_placements = sort_placements_for_display(outcome.placements if outcome else [])
+    placed_items = [
+        _placement_payload(placement, place_no=index)
+        for index, placement in enumerate(ordered_placements, start=1)
+    ]
     unplaced_items = _unplaced_payload(outcome.unplaced_parts if outcome else [], catalog_items)
     packed_count = len(placed_items)
     unpacked_count = sum(item["quantity"] for item in unplaced_items)
@@ -371,12 +393,15 @@ def _truck_payload(constraints: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _placement_payload(placement: Placement) -> dict[str, Any]:
+def _placement_payload(placement: Placement, *, place_no: int | None = None) -> dict[str, Any]:
+    metadata = dict(placement.part.metadata)
     return {
+        "place_no": place_no,
         "instance_id": placement.part_id,
         "item_id": placement.part.source_part_id or placement.part_id,
         "name": placement.part.display_name or placement.part_id,
         "source_path": placement.part.source_path,
+        "source_kind": metadata.get("source_kind") or ("manual" if not placement.part.source_path else "step"),
         "copy_index": placement.copy_index,
         "rotation": placement.rot,
         "position_mm": {

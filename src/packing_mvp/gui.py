@@ -21,6 +21,7 @@ from packing_mvp.catalog import (
     DEFAULT_TRUCK_WIDTH_MM,
     CatalogItem,
     PackProject,
+    TruckConfig,
 )
 from packing_mvp.presentation import (
     format_result_summary,
@@ -118,11 +119,72 @@ def _pick_step_file(dropped_paths: Sequence[str | bytes]) -> Path | None:
 
 def _input_summary(items: Sequence[CatalogItem]) -> str:
     if not items:
-        return "STEP-файлы пока не выбраны. Загрузите грузовые места для расчёта."
+        return "Грузовые места пока не выбраны. Загрузите STEP или добавьте ящик вручную."
+    step_count = sum(1 for item in items if not item.is_manual)
+    manual_count = sum(1 for item in items if item.is_manual)
     return (
-        f"Загружено типов STEP: {len(items)}. "
+        f"Типов: {len(items)} (STEP: {step_count}, ручных: {manual_count}). "
         f"Всего грузовых мест: {sum(item.quantity for item in items)}."
     )
+
+
+class ManualBoxDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Misc) -> None:
+        super().__init__(parent)
+        self.title("Ручной ящик")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.result: tuple[str, tuple[float, float, float]] | None = None
+        self.name_var = tk.StringVar(value="Ящик")
+        self.length_var = tk.StringVar()
+        self.width_var = tk.StringVar()
+        self.height_var = tk.StringVar()
+
+        frame = ttk.Frame(self, style="Card.TFrame", padding=16)
+        frame.grid(row=0, column=0, sticky="nsew")
+        frame.grid_columnconfigure(1, weight=1)
+
+        for row_index, (label, variable) in enumerate(
+            (
+                ("Наименование", self.name_var),
+                ("Длина (мм)", self.length_var),
+                ("Ширина (мм)", self.width_var),
+                ("Высота (мм)", self.height_var),
+            )
+        ):
+            ttk.Label(frame, text=label, style="FieldLabel.TLabel").grid(row=row_index, column=0, sticky="w", pady=(0, 8))
+            ttk.Entry(frame, textvariable=variable, width=26, style="Input.TEntry").grid(row=row_index, column=1, sticky="ew", padx=(12, 0), pady=(0, 8))
+
+        actions = ttk.Frame(frame, style="Card.TFrame")
+        actions.grid(row=4, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        ttk.Button(actions, text="Добавить", command=self._submit, style="Primary.TButton").pack(side="left")
+        ttk.Button(actions, text="Отмена", command=self._cancel, style="Secondary.TButton").pack(side="left", padx=(8, 0))
+
+        self.bind("<Return>", lambda _event: self._submit())
+        self.bind("<Escape>", lambda _event: self._cancel())
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.grab_set()
+        self.focus_set()
+
+    def _submit(self) -> None:
+        try:
+            name = self.name_var.get().strip()
+            if not name:
+                raise ValueError("Наименование: поле обязательно.")
+            dims = (
+                _positive_float(self.length_var.get(), "Длина"),
+                _positive_float(self.width_var.get(), "Ширина"),
+                _positive_float(self.height_var.get(), "Высота"),
+            )
+        except Exception as exc:
+            messagebox.showerror("Ручной ящик", str(exc), parent=self)
+            return
+        self.result = (name, dims)
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self.result = None
+        self.destroy()
 
 
 class PackingGui(tk.Tk):
@@ -136,13 +198,15 @@ class PackingGui(tk.Tk):
         self._fonts = self._build_fonts()
         self._configure_theme()
         self._catalog_items: list[CatalogItem] = []
-        self._input_quantity_vars: dict[Path, tk.StringVar] = {}
+        self._input_quantity_vars: dict[str, tk.StringVar] = {}
         self._worker: threading.Thread | None = None
+        self._loader_thread: threading.Thread | None = None
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._poll_after_id: str | None = None
         self._dragdrop_after_id: str | None = None
         self._destroying = False
         self._running = False
+        self._loading_inputs = False
         self._advanced_visible = False
         self._selected_item_id: str | None = None
         self._last_result: PackingRunResult | None = None
@@ -160,6 +224,7 @@ class PackingGui(tk.Tk):
         self.status_var = tk.StringVar(
             value="Загрузите STEP-файлы, проверьте габариты грузовых мест и запустите расчёт укладки."
         )
+        self._selected_name_var = tk.StringVar()
         self._selected_dims_l_var = tk.StringVar()
         self._selected_dims_w_var = tk.StringVar()
         self._selected_dims_h_var = tk.StringVar()
@@ -328,19 +393,22 @@ class PackingGui(tk.Tk):
         top.pack(fill="x", padx=12, pady=(12, 8))
         self.select_input_button = ttk.Button(top, text="Загрузить STEP-файлы", command=self._select_files, style="Hero.TButton")
         self.select_input_button.pack(side="left")
+        self.add_manual_button = ttk.Button(top, text="Добавить ящик", command=self._add_manual_box, style="Secondary.TButton")
+        self.add_manual_button.pack(side="left", padx=(8, 0))
         ttk.Label(top, textvariable=self.input_var, style="FieldLabel.TLabel").pack(side="left", fill="x", expand=True, padx=(14, 10))
         count_wrap = ttk.Frame(top, style="Card.TFrame")
         count_wrap.pack(side="right")
         ttk.Label(count_wrap, text="Всего мест:", style="FieldLabel.TLabel").pack(side="left", padx=(0, 6))
         ttk.Label(count_wrap, textvariable=self.input_count_var, style="CardCount.TLabel").pack(side="left")
-        cols = ("filename", "dims", "qty", "override", "path")
+        cols = ("filename", "kind", "dims", "qty", "override", "path")
         self.catalog_tree = ttk.Treeview(cat, columns=cols, show="headings", height=8)
         for col, text, width in (
             ("filename", "Имя файла", 240),
+            ("kind", "Тип", 90),
             ("dims", "Д x Ш x В (мм)", 170),
             ("qty", "Кол-во", 80),
             ("override", "Ручн.", 80),
-            ("path", "Источник", 540),
+            ("path", "Источник", 450),
         ):
             self.catalog_tree.heading(col, text=text)
             self.catalog_tree.column(col, width=width, anchor="w" if col in {"filename", "path"} else "center")
@@ -353,19 +421,24 @@ class PackingGui(tk.Tk):
         row.pack(fill="x", padx=12, pady=(12, 8))
         for i in range(8):
             row.grid_columnconfigure(i, weight=1 if i in {1, 3, 5, 7} else 0)
+        ttk.Label(row, text="Наименование", style="FieldLabel.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Entry(row, textvariable=self._selected_name_var, style="Input.TEntry").grid(row=0, column=1, columnspan=7, sticky="ew", padx=(8, 0), pady=(0, 10))
         for col, text, var in (
             (0, "Длина", self._selected_dims_l_var),
             (2, "Ширина", self._selected_dims_w_var),
             (4, "Высота", self._selected_dims_h_var),
             (6, "Количество", self._selected_qty_var),
         ):
-            ttk.Label(row, text=text, style="FieldLabel.TLabel").grid(row=0, column=col, sticky="w")
-            ttk.Entry(row, textvariable=var, width=12, style="Input.TEntry").grid(row=0, column=col + 1, sticky="ew", padx=(8, 14 if col < 6 else 0))
+            ttk.Label(row, text=text, style="FieldLabel.TLabel").grid(row=1, column=col, sticky="w")
+            ttk.Entry(row, textvariable=var, width=12, style="Input.TEntry").grid(row=1, column=col + 1, sticky="ew", padx=(8, 14 if col < 6 else 0))
         btns = ttk.Frame(edit, style="Card.TFrame")
         btns.pack(fill="x", padx=12, pady=(0, 12))
-        ttk.Button(btns, text="Применить изменения", command=self._apply_selected, style="Primary.TButton").pack(side="left")
-        ttk.Button(btns, text="Удалить из проекта", command=self._remove_selected, style="Secondary.TButton").pack(side="left", padx=(8, 0))
-        ttk.Button(btns, text="Удалить STEP-файл", command=self._delete_selected_file, style="Secondary.TButton").pack(side="left", padx=(8, 0))
+        self.apply_selected_button = ttk.Button(btns, text="Применить изменения", command=self._apply_selected, style="Primary.TButton")
+        self.apply_selected_button.pack(side="left")
+        self.remove_selected_button = ttk.Button(btns, text="Удалить из проекта", command=self._remove_selected, style="Secondary.TButton")
+        self.remove_selected_button.pack(side="left", padx=(8, 0))
+        self.delete_selected_button = ttk.Button(btns, text="Удалить STEP-файл", command=self._delete_selected_file, style="Secondary.TButton")
+        self.delete_selected_button.pack(side="left", padx=(8, 0))
 
         truck = ttk.Labelframe(self.form_frame, text="Параметры кузова", style="Section.TLabelframe")
         truck.pack(fill="x", pady=(0, 12))
@@ -404,8 +477,14 @@ class PackingGui(tk.Tk):
         self.action_bar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         self.run_button = ttk.Button(self.action_bar, text="Рассчитать укладку", command=self._start_run, style="Primary.TButton")
         self.run_button.pack(side="left")
-        ttk.Button(self.action_bar, text="Сохранить проект", command=self._save_project, style="Secondary.TButton").pack(side="left", padx=(8, 0))
-        ttk.Button(self.action_bar, text="Загрузить проект", command=self._load_project_file, style="Secondary.TButton").pack(side="left", padx=(8, 0))
+        self.reset_layout_button = ttk.Button(self.action_bar, text="Сбросить раскладку", command=self._reset_layout, style="Secondary.TButton")
+        self.reset_layout_button.pack(side="left", padx=(8, 0))
+        self.save_project_button = ttk.Button(self.action_bar, text="Сохранить проект", command=self._save_project, style="Secondary.TButton")
+        self.save_project_button.pack(side="left", padx=(8, 0))
+        self.load_project_button = ttk.Button(self.action_bar, text="Загрузить проект", command=self._load_project_file, style="Secondary.TButton")
+        self.load_project_button.pack(side="left", padx=(8, 0))
+        self.open_report_button = ttk.Button(self.action_bar, text="Excel", command=self._open_report, state="disabled", style="Secondary.TButton")
+        self.open_report_button.pack(side="left", padx=(8, 0))
         self.open_folder_button = ttk.Button(self.action_bar, text="Открыть результат", command=self._open_result_dir, state="disabled", style="Secondary.TButton")
         self.open_folder_button.pack(side="left", padx=(8, 0))
         self.open_top_button = ttk.Button(self.action_bar, text="Вид сверху", command=lambda: self._open_preview("top"), state="disabled", style="Secondary.TButton")
@@ -414,9 +493,9 @@ class PackingGui(tk.Tk):
         self.open_side_button.pack(side="left", padx=(8, 0))
         self.open_gif_button = ttk.Button(self.action_bar, text="GIF", command=self._open_animation, state="disabled", style="Secondary.TButton")
         self.open_gif_button.pack(side="left", padx=(8, 0))
-        ttk.Button(self.action_bar, text="3D-предпросмотр", command=self._open_3d, style="Secondary.TButton").pack(side="left", padx=(8, 0))
+        self.open_3d_button = ttk.Button(self.action_bar, text="3D-предпросмотр", command=self._open_3d, style="Secondary.TButton")
+        self.open_3d_button.pack(side="left", padx=(8, 0))
         self.check_updates_button = ttk.Button(self.action_bar, text="Проверить обновления", command=self._check_updates_clicked, style="Ghost.TButton")
-        self.check_updates_button.pack(side="right")
 
         self.status_frame = ttk.Frame(foot, style="App.TFrame")
         self.status_frame.grid(row=1, column=0, sticky="ew")
@@ -433,7 +512,10 @@ class PackingGui(tk.Tk):
             font=self._fonts["status"],
         )
         self.banner_label.pack(fill="x")
-        ttk.Label(self.status_frame, textvariable=self.update_status_var, style="Muted.TLabel").pack(anchor="e", pady=(6, 0))
+        meta_bar = ttk.Frame(self.status_frame, style="App.TFrame")
+        meta_bar.pack(fill="x", pady=(6, 0))
+        self.check_updates_button.pack(in_=meta_bar, side="right")
+        ttk.Label(meta_bar, textvariable=self.update_status_var, style="Muted.TLabel").pack(side="right", padx=(0, 10))
         self.log_container = ttk.Labelframe(foot, text="Журнал", style="Section.TLabelframe")
         self.log_container.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         self.log_text = tk.Text(
@@ -457,7 +539,7 @@ class PackingGui(tk.Tk):
         self._dragdrop_after_id = None
         if windnd is not None:
             try:
-                windnd.hook_dropfiles(self, func=lambda paths: self._apply_input_paths(_pick_step_files(paths)))
+                windnd.hook_dropfiles(self, func=lambda paths: self._load_input_paths_async(_pick_step_files(paths)))
             except Exception:
                 pass
 
@@ -516,10 +598,167 @@ class PackingGui(tk.Tk):
         self.update_idletasks()
         self._update_scrollregion()
 
+    def _next_item_id(self, prefix: str = "item", *, reserved: set[str] | None = None) -> str:
+        existing = {item.item_id for item in self._catalog_items}
+        if reserved:
+            existing.update(reserved)
+        index = 1
+        while True:
+            candidate = f"{prefix}_{index:03d}"
+            if candidate not in existing:
+                return candidate
+            index += 1
+
+    def _default_output_dir(self) -> Path:
+        for item in self._catalog_items:
+            if item.source_path:
+                return make_default_output_dir(Path(item.source_path))
+        return make_default_output_dir(Path.cwd() / "manual_item.step")
+
+    def _build_catalog_item_from_path(self, resolved: Path, *, item_id: str, scale: float) -> CatalogItem:
+        try:
+            return extract_catalog_item(resolved, item_id=item_id, quantity=1, scale=scale)
+        except Exception as exc:
+            return CatalogItem(
+                item_id=item_id,
+                filename=resolved.name,
+                source_path=str(resolved),
+                detected_dims_mm=(1.0, 1.0, 1.0),
+                dimensions_mm=(1.0, 1.0, 1.0),
+                source_kind="step",
+                quantity=1,
+                manual_override=True,
+            )
+
+    def _apply_loaded_catalog_items(self, items: Sequence[CatalogItem]) -> None:
+        if not items:
+            return
+        for item in items:
+            self._catalog_items.append(item)
+            self._input_quantity_vars[item.item_id] = tk.StringVar(value=str(item.quantity))
+        if not self.output_var.get().strip():
+            self.output_var.set(str(self._default_output_dir()))
+        self._reset_result_state(
+            status_message="Типы грузовых мест обновлены. Проверьте размеры и запустите новый расчёт.",
+            log_message=f"Добавлено типов: {len(items)}",
+        )
+        self._refresh_catalog()
+
+    def _load_input_paths_async(self, input_paths: Sequence[Path]) -> None:
+        if self._running or self._loading_inputs:
+            return
+        existing_paths = {
+            Path(item.source_path).resolve()
+            for item in self._catalog_items
+            if item.source_path and not item.is_manual
+        }
+        pending: list[tuple[Path, str]] = []
+        seen: set[Path] = set()
+        reserved_ids: set[str] = set()
+        for path in input_paths:
+            resolved = Path(path).resolve()
+            if resolved in existing_paths or resolved in seen:
+                continue
+            seen.add(resolved)
+            item_id = self._next_item_id(reserved=reserved_ids)
+            reserved_ids.add(item_id)
+            pending.append((resolved, item_id))
+        if not pending:
+            return
+        try:
+            scale = _positive_float(self.scale_var.get(), "Масштаб")
+        except Exception as exc:
+            messagebox.showerror("Загрузка STEP", str(exc))
+            return
+        self._set_loading_inputs(True)
+        self.status_var.set("Загрузка STEP-файлов...")
+        self._set_status_banner(NEUTRAL_BANNER)
+
+        def worker() -> None:
+            loaded_items: list[CatalogItem] = []
+            for index, (resolved, item_id) in enumerate(pending, start=1):
+                self._events.put(("status", f"Загрузка STEP {index}/{len(pending)}: {resolved.name}"))
+                loaded_items.append(self._build_catalog_item_from_path(resolved, item_id=item_id, scale=scale))
+            self._events.put(("inputs_loaded", loaded_items))
+
+        self._loader_thread = threading.Thread(target=worker, daemon=True)
+        self._loader_thread.start()
+
+    def _add_manual_box(self) -> None:
+        if self._running or self._loading_inputs:
+            return
+        dialog = ManualBoxDialog(self)
+        self.wait_window(dialog)
+        if dialog.result is None:
+            return
+        name, dims = dialog.result
+        item = CatalogItem.from_manual_box(
+            item_id=self._next_item_id("manual"),
+            name=name,
+            dims_mm=dims,
+            quantity=1,
+        )
+        self._apply_loaded_catalog_items([item])
+
+    def _reset_layout(self) -> None:
+        if self._running or self._loading_inputs:
+            return
+        default_status = (
+            "Раскладка сброшена. Проверьте размеры и запустите новый расчёт."
+            if self._catalog_items
+            else "Загрузите STEP-файлы, проверьте габариты грузовых мест и запустите расчёт укладки."
+        )
+        self._reset_result_state(status_message=default_status, log_message="Раскладка сброшена.")
+
+    def _reset_result_state(self, *, status_message: str | None = None, log_message: str | None = None) -> None:
+        self._last_result = None
+        self.open_report_button.configure(state="disabled")
+        self.open_folder_button.configure(state="disabled")
+        self.open_top_button.configure(state="disabled")
+        self.open_side_button.configure(state="disabled")
+        self.open_gif_button.configure(state="disabled")
+        if status_message is not None:
+            self.status_var.set(status_message)
+            self._set_status_banner(NEUTRAL_BANNER)
+        if log_message:
+            self._append_log(log_message)
+
+    def _set_loading_inputs(self, loading: bool) -> None:
+        self._loading_inputs = loading
+        self._update_control_states()
+
+    def _update_control_states(self) -> None:
+        busy = self._running or self._loading_inputs
+        state = "disabled" if busy else "normal"
+        for widget in (
+            self.run_button,
+            self.select_input_button,
+            self.add_manual_button,
+            self.advanced_toggle_button,
+            self.check_updates_button,
+            self.output_button,
+            self.save_project_button,
+            self.load_project_button,
+            self.reset_layout_button,
+            self.open_3d_button,
+        ):
+            widget.configure(state=state)
+        self._update_selected_action_states()
+
+    def _update_selected_action_states(self) -> None:
+        item = self._selected_item()
+        busy = self._running or self._loading_inputs
+        has_item = item is not None
+        state = "normal" if has_item and not busy else "disabled"
+        self.apply_selected_button.configure(state=state)
+        self.remove_selected_button.configure(state=state)
+        delete_state = "normal" if has_item and not busy and item is not None and not item.is_manual else "disabled"
+        self.delete_selected_button.configure(state=delete_state)
+
     def _select_files(self) -> None:
         paths = filedialog.askopenfilenames(title="Выберите STEP-файлы", filetypes=[("STEP files", "*.stp *.step"), ("All files", "*.*")])
         if paths:
-            self._apply_input_paths(Path(path) for path in paths)
+            self._load_input_paths_async(Path(path) for path in paths)
 
     def _select_output(self) -> None:
         current = self.output_var.get().strip() or None
@@ -530,12 +769,21 @@ class PackingGui(tk.Tk):
     def _save_project(self) -> None:
         items = self._catalog_from_ui()
         if not items:
-            messagebox.showerror("Проект", "Сначала загрузите хотя бы один STEP-файл.")
+            messagebox.showerror("Проект", "Сначала добавьте хотя бы один тип грузового места.")
             return
         path = filedialog.asksaveasfilename(title="Сохранить проект", defaultextension=".packproj", filetypes=[("Проект укладки", "*.packproj")])
         if not path:
             return
-        project = PackProject(items=tuple(items), result=(self._last_result.result_data if self._last_result else None))
+        project = PackProject(
+            items=tuple(items),
+            truck=TruckConfig(
+                length_mm=_positive_float(self.max_l_var.get(), "Длина кузова"),
+                width_mm=_positive_float(self.max_w_var.get(), "Ширина кузова"),
+                height_mm=_positive_float(self.max_h_var.get(), "Высота кузова"),
+                gap_mm=_nonnegative_float(self.gap_var.get(), "Зазор"),
+            ),
+            result=(self._last_result.result_data if self._last_result else None),
+        )
         save_project(project, Path(path))
         self._append_log(f"Проект сохранён: {path}")
 
@@ -549,7 +797,8 @@ class PackingGui(tk.Tk):
         self.max_h_var.set(str(int(project.truck.height_mm)))
         self.gap_var.set(str(int(project.truck.gap_mm)))
         self._catalog_items = list(project.items)
-        self._input_quantity_vars = {Path(item.source_path).resolve(): tk.StringVar(value=str(item.quantity)) for item in self._catalog_items}
+        self._input_quantity_vars = {item.item_id: tk.StringVar(value=str(item.quantity)) for item in self._catalog_items}
+        self._reset_result_state()
         self._refresh_catalog()
         self._append_log(f"Проект загружен: {path}")
         if project.result:
@@ -557,34 +806,56 @@ class PackingGui(tk.Tk):
             self._set_status_banner(SUCCESS_BANNER if result_is_successful_fit(project.result) else NO_FIT_BANNER)
 
     def _apply_input_paths(self, input_paths: Sequence[Path]) -> None:
-        existing = {Path(item.source_path).resolve() for item in self._catalog_items}
+        existing = {
+            Path(item.source_path).resolve()
+            for item in self._catalog_items
+            if item.source_path and not item.is_manual
+        }
+        loaded_items: list[CatalogItem] = []
+        reserved_ids: set[str] = set()
         for path in input_paths:
             resolved = Path(path).resolve()
             if resolved in existing:
                 continue
-            item_id = f"item_{len(self._catalog_items) + 1:03d}"
+            item_id = self._next_item_id(reserved=reserved_ids)
+            reserved_ids.add(item_id)
             try:
                 item = extract_catalog_item(resolved, item_id=item_id, quantity=1, scale=float(self.scale_var.get() or "1.0"))
             except Exception as exc:
                 self._append_log(f"Не удалось определить габариты для {resolved.name}: {exc}")
-                item = CatalogItem(item_id=item_id, filename=resolved.name, source_path=str(resolved), detected_dims_mm=(1.0, 1.0, 1.0), dimensions_mm=(1.0, 1.0, 1.0), quantity=1, manual_override=True)
-            self._catalog_items.append(item)
-            self._input_quantity_vars[resolved] = tk.StringVar(value=str(item.quantity))
+                item = CatalogItem(
+                    item_id=item_id,
+                    filename=resolved.name,
+                    source_path=str(resolved),
+                    detected_dims_mm=(1.0, 1.0, 1.0),
+                    dimensions_mm=(1.0, 1.0, 1.0),
+                    source_kind="step",
+                    quantity=1,
+                    manual_override=True,
+                )
+            loaded_items.append(item)
             existing.add(resolved)
-        if self._catalog_items and not self.output_var.get().strip():
-            self.output_var.set(str(make_default_output_dir(Path(self._catalog_items[0].source_path))))
-        if self._catalog_items:
-            self.status_var.set("STEP-файлы загружены. Проверьте размеры и количество, затем запустите расчёт.")
-        self._refresh_catalog()
+        self._apply_loaded_catalog_items(loaded_items)
 
     def _refresh_catalog(self) -> None:
         self.catalog_tree.delete(*self.catalog_tree.get_children())
         for item in self._catalog_items:
-            path = Path(item.source_path).resolve()
-            qty_var = self._input_quantity_vars.setdefault(path, tk.StringVar(value=str(item.quantity)))
+            qty_var = self._input_quantity_vars.setdefault(item.item_id, tk.StringVar(value=str(item.quantity)))
             qty_var.set(str(item.quantity))
-            self.catalog_tree.insert("", "end", iid=item.item_id, values=(item.filename, f"{_format_mm_value(item.dimensions_mm[0])} x {_format_mm_value(item.dimensions_mm[1])} x {_format_mm_value(item.dimensions_mm[2])}", item.quantity, "да" if item.manual_override else "нет", item.source_path))
-        self.input_var.set("; ".join(item.source_path for item in self._catalog_items))
+            self.catalog_tree.insert(
+                "",
+                "end",
+                iid=item.item_id,
+                values=(
+                    item.filename,
+                    "Ручной" if item.is_manual else "STEP",
+                    f"{_format_mm_value(item.dimensions_mm[0])} x {_format_mm_value(item.dimensions_mm[1])} x {_format_mm_value(item.dimensions_mm[2])}",
+                    item.quantity,
+                    "да" if item.manual_override else "нет",
+                    item.source_path or "Ручной ящик",
+                ),
+            )
+        self.input_var.set("; ".join(item.source_path or item.filename for item in self._catalog_items))
         self.input_count_var.set(str(sum(item.quantity for item in self._catalog_items)))
         self.input_summary_var.set(_input_summary(self._catalog_items))
         if self._catalog_items:
@@ -594,10 +865,12 @@ class PackingGui(tk.Tk):
             self._load_selected()
         else:
             self._selected_item_id = None
+            self._selected_name_var.set("")
             self._selected_dims_l_var.set("")
             self._selected_dims_w_var.set("")
             self._selected_dims_h_var.set("")
             self._selected_qty_var.set("1")
+        self._update_selected_action_states()
         self.update_idletasks()
         self._update_scrollregion()
 
@@ -617,22 +890,37 @@ class PackingGui(tk.Tk):
         item = self._selected_item()
         if item is None:
             return
+        self._selected_name_var.set(item.filename)
         self._selected_dims_l_var.set(_format_mm_value(item.dimensions_mm[0]))
         self._selected_dims_w_var.set(_format_mm_value(item.dimensions_mm[1]))
         self._selected_dims_h_var.set(_format_mm_value(item.dimensions_mm[2]))
         self._selected_qty_var.set(str(item.quantity))
+        self._update_selected_action_states()
 
     def _apply_selected(self) -> None:
         item = self._selected_item()
         if item is None:
             return
-        updated = item.with_dimensions((_positive_float(self._selected_dims_l_var.get(), "Длина"), _positive_float(self._selected_dims_w_var.get(), "Ширина"), _positive_float(self._selected_dims_h_var.get(), "Высота"))).with_quantity(_positive_int(self._selected_qty_var.get(), "Количество"))
+        updated = (
+            item.with_name(self._selected_name_var.get())
+            .with_dimensions(
+                (
+                    _positive_float(self._selected_dims_l_var.get(), "Длина"),
+                    _positive_float(self._selected_dims_w_var.get(), "Ширина"),
+                    _positive_float(self._selected_dims_h_var.get(), "Высота"),
+                )
+            )
+            .with_quantity(_positive_int(self._selected_qty_var.get(), "Количество"))
+        )
         for idx, current in enumerate(self._catalog_items):
             if current.item_id == item.item_id:
                 self._catalog_items[idx] = updated
-                self._input_quantity_vars[Path(updated.source_path).resolve()].set(str(updated.quantity))
+                self._input_quantity_vars[updated.item_id].set(str(updated.quantity))
                 break
-        self._append_log(f"Параметры обновлены для {updated.filename}.")
+        self._reset_result_state(
+            status_message="Исходные данные изменены. Запустите новый расчёт.",
+            log_message=f"Параметры обновлены для {updated.filename}.",
+        )
         self._refresh_catalog()
 
     def _remove_selected(self) -> None:
@@ -640,14 +928,19 @@ class PackingGui(tk.Tk):
         if item is None:
             return
         self._catalog_items = [current for current in self._catalog_items if current.item_id != item.item_id]
-        self._input_quantity_vars.pop(Path(item.source_path).resolve(), None)
+        self._input_quantity_vars.pop(item.item_id, None)
         self._selected_item_id = self._catalog_items[0].item_id if self._catalog_items else None
-        self._append_log(f"Удалено из проекта: {item.filename}")
+        self._reset_result_state(
+            status_message="Состав проекта изменён. Запустите новый расчёт.",
+            log_message=f"Удалено из проекта: {item.filename}",
+        )
         self._refresh_catalog()
 
     def _delete_selected_file(self) -> None:
         item = self._selected_item()
         if item is None:
+            return
+        if item.is_manual or not item.source_path:
             return
         if not messagebox.askyesno("Удаление STEP-файла", f"Удалить файл {item.filename} с диска?"):
             return
@@ -662,21 +955,21 @@ class PackingGui(tk.Tk):
     def _catalog_from_ui(self) -> list[CatalogItem]:
         items: list[CatalogItem] = []
         for item in self._catalog_items:
-            path = Path(item.source_path).resolve()
-            items.append(item.with_quantity(_positive_int(self._input_quantity_vars[path].get(), "Количество")))
+            items.append(item.with_quantity(_positive_int(self._input_quantity_vars[item.item_id].get(), "Количество")))
         return items
 
     def _build_request(self) -> PackingRequest:
         items = self._catalog_from_ui()
         if not items:
-            raise ValueError("Нужно выбрать хотя бы один STEP-файл.")
+            raise ValueError("Нужно добавить хотя бы один тип грузового места.")
         self.input_count_var.set(str(sum(item.quantity for item in items)))
         self.input_summary_var.set(_input_summary(items))
-        out_dir = Path(self.output_var.get().strip()) if self.output_var.get().strip() else make_default_output_dir(Path(items[0].source_path))
+        anchor_path = next((Path(item.source_path) for item in items if item.source_path), Path.cwd() / "manual_item.step")
+        out_dir = Path(self.output_var.get().strip()) if self.output_var.get().strip() else make_default_output_dir(anchor_path)
         self.output_var.set(str(out_dir))
         return PackingRequest(
-            input_path=Path(items[0].source_path),
-            input_paths=tuple(Path(item.source_path) for item in items),
+            input_path=anchor_path,
+            input_paths=tuple(Path(item.source_path) for item in items if item.source_path),
             input_quantities=tuple(item.quantity for item in items),
             catalog_items=tuple(items),
             out_dir=out_dir,
@@ -689,7 +982,7 @@ class PackingGui(tk.Tk):
         )
 
     def _start_run(self) -> None:
-        if self._running:
+        if self._running or self._loading_inputs:
             return
         try:
             request = self._build_request()
@@ -724,6 +1017,9 @@ class PackingGui(tk.Tk):
             if event_type == "status":
                 self.status_var.set(str(payload))
                 self._append_log(str(payload))
+            elif event_type == "inputs_loaded":
+                self._set_loading_inputs(False)
+                self._apply_loaded_catalog_items(payload if isinstance(payload, list) else [])
             elif event_type == "done":
                 self._handle_result(payload)
                 break
@@ -742,6 +1038,7 @@ class PackingGui(tk.Tk):
         self.status_var.set(summary)
         self._append_log(summary)
         self._set_status_banner(_banner_for_result(result))
+        self.open_report_button.configure(state="normal" if result.report_path and result.report_path.exists() else "disabled")
         self.open_folder_button.configure(state="normal")
         self.open_top_button.configure(state="normal" if result.preview_top_path and result.preview_top_path.exists() else "disabled")
         self.open_side_button.configure(state="normal" if result.preview_side_path and result.preview_side_path.exists() else "disabled")
@@ -756,6 +1053,10 @@ class PackingGui(tk.Tk):
     def _open_result_dir(self) -> None:
         if self._last_result:
             _open_path(self._last_result.out_dir)
+
+    def _open_report(self) -> None:
+        if self._last_result and self._last_result.report_path and self._last_result.report_path.exists():
+            _open_path(self._last_result.report_path)
 
     def _open_preview(self, which: str) -> None:
         if self._last_result is None:
@@ -781,11 +1082,7 @@ class PackingGui(tk.Tk):
 
     def _set_running(self, running: bool) -> None:
         self._running = running
-        state = "disabled" if running else "normal"
-        for widget in (self.run_button, self.select_input_button, self.advanced_toggle_button, self.check_updates_button):
-            widget.configure(state=state)
-        if hasattr(self, "output_button"):
-            self.output_button.configure(state=state)
+        self._update_control_states()
 
     def _set_status_banner(self, banner: str) -> None:
         if banner == SUCCESS_BANNER:

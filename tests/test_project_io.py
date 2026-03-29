@@ -27,6 +27,12 @@ class ProjectIoTests(unittest.TestCase):
                     quantity=2,
                     manual_override=True,
                 ),
+                CatalogItem.from_manual_box(
+                    item_id="manual_001",
+                    name="Manual crate",
+                    dims_mm=(1200.0, 900.0, 700.0),
+                    quantity=3,
+                ),
             ),
             truck=TruckConfig(length_mm=9000.0, width_mm=2350.0, height_mm=2400.0, gap_mm=50.0),
             result={"status": "failed", "unplaced_items": [{"item_id": "item_001", "quantity": 1}]},
@@ -39,6 +45,8 @@ class ProjectIoTests(unittest.TestCase):
         self.assertEqual(restored.truck.length_mm, 9000.0)
         self.assertEqual(restored.items[0].dimensions_mm, (1010.0, 810.0, 610.0))
         self.assertTrue(restored.items[0].manual_override)
+        self.assertEqual(restored.items[1].source_kind, "manual")
+        self.assertEqual(restored.items[1].quantity, 3)
         self.assertEqual(restored.result["status"], "failed")
 
 

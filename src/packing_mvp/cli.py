@@ -86,9 +86,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.project:
         project = load_project(args.project)
+        anchor_path = next((Path(item.source_path) for item in project.items if item.source_path), Path.cwd() / "manual_item.step")
         request = PackingRequest(
-            input_path=Path(project.items[0].source_path) if project.items else Path("project.packproj"),
-            input_paths=tuple(Path(item.source_path) for item in project.items),
+            input_path=anchor_path if project.items else Path("project.packproj"),
+            input_paths=tuple(Path(item.source_path) for item in project.items if item.source_path),
             input_quantities=tuple(item.quantity for item in project.items),
             catalog_items=tuple(project.items),
             out_dir=args.out,

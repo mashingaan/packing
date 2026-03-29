@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from openpyxl import load_workbook
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -95,10 +97,14 @@ class RunnerSmokeTests(unittest.TestCase):
             self.assertTrue((result.out_dir / "preview_top.png").exists())
             self.assertTrue((result.out_dir / "preview_side.png").exists())
             self.assertTrue((result.out_dir / "preview.gif").exists())
+            self.assertTrue((result.out_dir / "packing_report.xlsx").exists())
             data = json.loads(result.result_path.read_text(encoding="utf-8"))
             self.assertTrue(data["success"])
             self.assertEqual(data["packed_count"], 3)
             self.assertEqual(len(data["catalog"]), 2)
+            self.assertEqual([item["place_no"] for item in data["placed_items"]], [1, 2, 3])
+            workbook = load_workbook(result.out_dir / "packing_report.xlsx")
+            self.assertEqual(workbook.sheetnames, ["Упаковочный лист", "Отправочные места"])
 
     def test_run_packing_job_reports_unplaced_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -134,6 +140,7 @@ class RunnerSmokeTests(unittest.TestCase):
             self.assertEqual(data["unpacked_count"], 2)
             self.assertEqual(data["unplaced_items"][0]["quantity"], 2)
             self.assertTrue(result.placements_path.exists())
+            self.assertTrue((result.out_dir / "packing_report.xlsx").exists())
 
     def test_run_packing_job_in_subprocess_emits_status_and_result(self) -> None:
         request = PackingRequest(input_path=Path("dummy.step"), out_dir=Path("out"))
