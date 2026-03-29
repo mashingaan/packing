@@ -514,7 +514,13 @@ class PackingGui(tk.Tk):
         self.banner_label.pack(fill="x")
         meta_bar = ttk.Frame(self.status_frame, style="App.TFrame")
         meta_bar.pack(fill="x", pady=(6, 0))
-        self.check_updates_button.pack(in_=meta_bar, side="right")
+        self.check_updates_button = ttk.Button(
+            meta_bar,
+            text=self.check_updates_button.cget("text"),
+            command=self._check_updates_clicked,
+            style="Ghost.TButton",
+        )
+        self.check_updates_button.pack(side="right")
         ttk.Label(meta_bar, textvariable=self.update_status_var, style="Muted.TLabel").pack(side="right", padx=(0, 10))
         self.log_container = ttk.Labelframe(foot, text="Журнал", style="Section.TLabelframe")
         self.log_container.grid(row=2, column=0, sticky="ew", pady=(10, 0))
