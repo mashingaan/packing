@@ -11,8 +11,59 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from packing_mvp.catalog import CatalogItem
-from packing_mvp.step_extract import build_parts_from_scaled_solids, extract_parts_from_step_files
+from packing_mvp.step_extract import _load_scaled_solids, build_parts_from_scaled_solids, extract_parts_from_step_files
 from packing_mvp.utils import SourceSolid
+
+
+class _FakeOption:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, float]] = []
+
+    def setNumber(self, name: str, value: float) -> None:
+        self.calls.append((name, value))
+
+
+class _FakeOcc:
+    def importShapes(self, path: str, highestDimOnly: bool = True, format: str = "step"):
+        return [(3, 1)]
+
+    def synchronize(self) -> None:
+        pass
+
+
+class _FakeModel:
+    def __init__(self) -> None:
+        self.occ = _FakeOcc()
+        self.names: list[str] = []
+
+    def add(self, name: str) -> None:
+        self.names.append(name)
+
+    def getEntities(self, dim: int):
+        if dim == 3:
+            return [(3, 1)]
+        return []
+
+    def getBoundingBox(self, dim: int, tag: int):
+        return (0.0, 0.0, 0.0, 100.0, 50.0, 20.0)
+
+
+class _FakeGmsh:
+    def __init__(self) -> None:
+        self.option = _FakeOption()
+        self.model = _FakeModel()
+        self.initialize_kwargs: list[dict[str, object]] = []
+        self.clear_calls = 0
+        self.finalize_calls = 0
+
+    def initialize(self, **kwargs) -> None:
+        self.initialize_kwargs.append(dict(kwargs))
+
+    def clear(self) -> None:
+        self.clear_calls += 1
+
+    def finalize(self) -> None:
+        self.finalize_calls += 1
 
 
 class StepExtractTests(unittest.TestCase):
@@ -59,6 +110,22 @@ class StepExtractTests(unittest.TestCase):
         self.assertEqual([part.part_id for part in parts], ["file_001", "file_002"])
         self.assertEqual([part.source_path for part in parts], ["first.step", "second.step"])
         self.assertEqual(len(units["source_units"]), 2)
+
+    def test_load_scaled_solids_disables_gmsh_signal_handlers(self) -> None:
+        fake_gmsh = _FakeGmsh()
+
+        with patch.dict(sys.modules, {"gmsh": fake_gmsh}):
+            with patch("pathlib.Path.exists", return_value=True):
+                solids, units = _load_scaled_solids(
+                    input_path=Path("demo.step"),
+                    scale=1.0,
+                    logger=None,
+                )
+
+        self.assertEqual(len(solids), 1)
+        self.assertEqual(units["scale"], 1.0)
+        self.assertEqual(fake_gmsh.initialize_kwargs, [{"interruptible": False}])
+        self.assertEqual(fake_gmsh.finalize_calls, 1)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Sequence
 
+from packing_mvp.gmsh_runtime import initialize_gmsh
 from packing_mvp.utils import ensure_directory
 
 
@@ -32,7 +33,7 @@ def merge_step_files(
 
     initialized = False
     try:
-        gmsh.initialize()
+        initialize_gmsh(gmsh)
         initialized = True
         gmsh.option.setNumber("General.Terminal", 1)
         gmsh.clear()

@@ -18,9 +18,13 @@ from packing_mvp.step_export import (
     _OcpModules,
     build_permutation_affine_matrix,
     export_arranged_step,
+    export_packed_scene,
     load_placements_csv,
 )
 from packing_mvp.utils import (
+    Part,
+    Placement,
+    SourceSolid,
     orientation_to_rigid_rotation,
     rotation_matrix_determinant,
     rotation_matrix_is_orthonormal,
@@ -184,6 +188,21 @@ class _FakeOcc:
         self.entities[copied_tag] = list(self.entities[source_tag])
         return [(3, copied_tag)]
 
+    def addBox(self, x: float, y: float, z: float, dx: float, dy: float, dz: float) -> int:
+        next_tag = (max(self.entities) if self.entities else 0) + 1
+        self.entities[next_tag] = [
+            float(x),
+            float(y),
+            float(z),
+            float(x + dx),
+            float(y + dy),
+            float(z + dz),
+        ]
+        if next_tag not in self.original_tags:
+            self.original_tags.append(next_tag)
+            self.original_tags.sort()
+        return next_tag
+
     def dilate(self, dimtags, x, y, z, sx, sy, sz) -> None:
         pass
 
@@ -250,12 +269,14 @@ class _FakeGmsh:
         self.option = _FakeOption()
         self.model = _FakeModel(entities)
         self.initialize_calls = 0
+        self.initialize_kwargs: list[dict[str, object]] = []
         self.finalize_calls = 0
         self.clear_calls = 0
         self.writes: list[str] = []
 
-    def initialize(self) -> None:
+    def initialize(self, **kwargs) -> None:
         self.initialize_calls += 1
+        self.initialize_kwargs.append(dict(kwargs))
 
     def finalize(self) -> None:
         self.finalize_calls += 1
@@ -579,6 +600,7 @@ class ExportArrangedStepTests(unittest.TestCase):
             self.assertEqual(fake_gmsh.model.occ.get_bounding_box_calls, 1)
             self.assertEqual(fake_gmsh.model.occ.entities[101][:3], [10.0, 20.0, 30.0])
             self.assertEqual(fake_gmsh.finalize_calls, 1)
+            self.assertEqual(fake_gmsh.initialize_kwargs, [{"interruptible": False}])
 
     def test_export_pipeline_branches_by_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -923,6 +945,41 @@ class ExportArrangedStepTests(unittest.TestCase):
                 writer.transferred_shapes[0].bbox,
                 (100.0, 0.0, 0.0, 220.0, 220.0, 330.0),
             )
+
+
+class ExportPackedSceneTests(unittest.TestCase):
+    def test_manual_box_fallback_uses_non_interruptible_gmsh_init(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            output_step = tmp_path / "packed.step"
+            fake_gmsh = _FakeGmsh()
+            placement = Placement(
+                part=Part(
+                    part_id="manual_001",
+                    solid_tag=1,
+                    dims=(1200.0, 800.0, 700.0),
+                    volume=1200.0 * 800.0 * 700.0,
+                    bbox_min=(0.0, 0.0, 0.0),
+                    bbox_max=(1200.0, 800.0, 700.0),
+                    mode="rigid_group",
+                    source_solids=(SourceSolid(tag=1, bbox_min=(0.0, 0.0, 0.0), bbox_max=(1200.0, 800.0, 700.0)),),
+                    source_path="",
+                ),
+                x=10.0,
+                y=20.0,
+                z=30.0,
+                dims=(1200.0, 800.0, 700.0),
+                rot="XYZ",
+            )
+
+            with patch("packing_mvp.step_export._load_ocp_modules", side_effect=RuntimeError("no source models")):
+                with patch.dict(sys.modules, {"gmsh": fake_gmsh}):
+                    export_mode = export_packed_scene([placement], output_step)
+
+            self.assertEqual(export_mode, "box_proxies")
+            self.assertTrue(output_step.exists())
+            self.assertEqual(fake_gmsh.initialize_kwargs, [{"interruptible": False}])
+            self.assertEqual(fake_gmsh.finalize_calls, 1)
 
 
 if __name__ == "__main__":

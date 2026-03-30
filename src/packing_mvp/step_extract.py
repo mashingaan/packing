@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from packing_mvp.catalog import CatalogItem
+from packing_mvp.gmsh_runtime import initialize_gmsh
 from packing_mvp.utils import Part, SourceSolid, combine_bboxes, dims_from_bbox
 
 
@@ -223,7 +224,7 @@ def _load_scaled_solids(
     auto_scale_factor = 1.0
     raw_max_dim = 0.0
     try:
-        gmsh.initialize()
+        initialize_gmsh(gmsh)
         initialized = True
         gmsh.option.setNumber("General.Terminal", 1)
         gmsh.clear()

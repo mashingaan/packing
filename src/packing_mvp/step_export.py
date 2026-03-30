@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from packing_mvp.gmsh_runtime import initialize_gmsh
 from packing_mvp.strategies.base import PackingMode
 from packing_mvp.utils import (
     EPS,
@@ -393,7 +394,7 @@ def _export_arranged_step_solids(
 
     initialized = False
     try:
-        gmsh.initialize()
+        initialize_gmsh(gmsh)
         initialized = True
         gmsh.option.setNumber("General.Terminal", 1)
         gmsh.clear()
@@ -1045,7 +1046,7 @@ def _export_box_proxy_scene(*, placements: list[Placement], output_step: Path) -
 
     initialized = False
     try:
-        gmsh.initialize()
+        initialize_gmsh(gmsh)
         initialized = True
         gmsh.option.setNumber("General.Terminal", 1)
         gmsh.clear()
